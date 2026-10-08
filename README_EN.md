@@ -2,7 +2,7 @@
 
 > **This is a fork of [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav).**
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
-> and is published as [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav) (v0.1.1).
+> and is published as [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav) (v0.1.2).
 > See [**Fork notes**](#fork-notes) below for the differences; the change is open
 > upstream as PR [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
@@ -40,9 +40,9 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 
 **Why fork**: upstream registers its viewer with `priority: 10`, so for the extensions it handles the built-in `TextEditor` never mounts — and better-sidebar's "selection → add to conversation" popup lives inside `TextEditor` only, while the `betterSidebar` service exposes no selection / popup / draft API at all. Those files therefore lose the capability outright. Upstream has no such feature and there was a local need for it.
 
-**Differences from upstream** (v0.1.1, i.e. the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1)):
+**Differences from upstream** (v0.1.2, i.e. the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1)):
 
-| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.1.1` |
+| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.1.2` |
 |---|---|---|
 | Selection → add to conversation | ❌ absent (lost once the viewer takes over) | ✅ floating button above the selection → inserts into the composer |
 | Insert payload | — | same shape as the built-in viewers: fenced block headed by `relative/path:start[-end]`; >500 chars inserts the path line only |
@@ -50,7 +50,7 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 | Insert mechanism | — | prefers the official `captureInsertion()` / `insertText()` (one undo step, reference chips preserved, refuses without touching the draft while the composer is busy); falls back to `setDraft` on older hosts |
 | Popup dismissal | — | same contract as better-sidebar: outside mousedown / Escape / hidden document / blur / scroll / surface leaving the viewport |
 | Package name | `dsh-code-nav` | `@whybebabo/dsh-code-nav` (avoids claiming the upstream name) |
-| Version | 0.1.0 (not on npm) | 0.1.1 (published to npm) |
+| Version | 0.1.0 (not on npm) | 0.1.2 (published to npm) |
 | Built artifact id | hardcoded `dsh-code-nav` | injected by `scripts/build.mjs` from `package.json`, so a rename cannot drift |
 | Everything else (highlighting / outline / search / language table) | as above | **no difference from upstream** |
 

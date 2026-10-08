@@ -1,6 +1,6 @@
 {
   "name": "@whybebabo/dsh-code-nav",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "DSH web plugin (dsh-better-sidebar companion): code file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable), in-file search and selection -> add to conversation. Fork of AnakinCao/dsh-code-nav.",
   "type": "module",
   "main": "lib/index.js",

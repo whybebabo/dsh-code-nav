@@ -4,7 +4,7 @@
 
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
 > 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」并发布为
-> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)（v0.1.1）。
+> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)（v0.1.2）。
 > 差异见下方[**Fork 说明**](#fork-说明)；改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -40,9 +40,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 **为什么 fork**：上游以 `priority: 10` 注册预览器，`.ts` 等扩展名被它接管后，内置 `TextEditor` 不再挂载 —— 而 better-sidebar 的「选中文字 → 添加到对话」浮层只实现在 `TextEditor` 内部，`betterSidebar` 服务面也没有任何选区 / 浮层 / 草稿 API，导致这些文件直接失去该能力。上游暂无此功能，且有本地使用需求。
 
-**相对上游的差异**（v0.1.1，即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容）：
+**相对上游的差异**（v0.1.2，即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容）：
 
-| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.1.1` |
+| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.1.2` |
 |---|---|---|
 | 选中文字 → 添加到对话 | ❌ 无（接管后该能力消失） | ✅ 选区上方浮层按钮 → 插入会话输入框 |
 | 插入载荷 | — | 与 better-sidebar 内置查看器同形状：`相对路径:起止行` 围栏块；>500 字只插路径行 |
@@ -50,7 +50,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 插入实现 | — | 优先官方 `captureInsertion()` / `insertText()`（一次可撤销、保留引用 chip、输入框忙时拒插且不动草稿），旧版宿主回退 `setDraft` |
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
-| 版本 | 0.1.0（未发布 npm） | 0.1.1（已发布 npm） |
+| 版本 | 0.1.0（未发布 npm） | 0.1.2（已发布 npm） |
 | 构建产物 id | 硬编码 `dsh-code-nav` | 由 `scripts/build.mjs` 从 `package.json` 注入，改名不再漂移 |
 | 其余（高亮 / 大纲 / 查找 / 语言表） | 同上 | **无差异**，与上游一致 |
 
