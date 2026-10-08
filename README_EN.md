@@ -34,6 +34,18 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 
 > ⚠️ **Do not install alongside the upstream `dsh-code-nav`** — both register the same viewer id (`dsh-code-nav:outline`) and will conflict.
 
+### Upgrading an existing install
+
+Name an **exact** version instead of relying only on the `^` range:
+
+```
+@whybebabo/dsh-code-nav@0.1.2
+```
+
+pnpm 11's supply-chain guard defaults to `minimumReleaseAge: 1440`, i.e. only versions published at least 24 hours ago are preferred. Because that is a **built-in default** rather than an explicit setting, `minimumReleaseAgeStrict` defaults to `false`: pnpm does not fail, it falls back to a version old enough to satisfy the age gate. So with `^0.1.1` still recorded, installing again resolves 0.1.1 (mature) over 0.1.2 (too new) and **reports success while the installed version never changes**.
+
+Naming an exact version leaves a single candidate in range, which pnpm installs and records in `minimumReleaseAgeExclude`. Alternatively, wait 24 hours after a release before upgrading with a `^` range.
+
 ## Fork notes
 
 **Origin**: [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) (upstream, MIT), fork baseline commit [`0d34d27`](https://github.com/AnakinCao/dsh-code-nav/commit/0d34d27). This fork lives at [whybebabo/dsh-code-nav](https://github.com/whybebabo/dsh-code-nav).

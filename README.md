@@ -34,6 +34,18 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 > ⚠️ **不要与上游 `dsh-code-nav` 同时安装** —— 两者注册同一个预览器 id（`dsh-code-nav:outline`），会互相冲突。
 
+### 升级到新版本
+
+已经装过本插件时，请**指定精确版本**，不要只依赖 `^` 范围：
+
+```
+@whybebabo/dsh-code-nav@0.1.2
+```
+
+原因：pnpm 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— pnpm 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，pnpm 会认为 0.1.1 够老、0.1.2 太新，**命令显示成功、版本却停在原地**。
+
+写成精确版本后，范围内只剩一个候选，pnpm 会安装它并把该版本记入 `minimumReleaseAgeExclude`。或者等新版本发布满 24 小时后再用 `^` 升级。
+
 ## Fork 说明
 
 **来源**：[AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav)（上游，MIT），fork 基线 commit [`0d34d27`](https://github.com/AnakinCao/dsh-code-nav/commit/0d34d27)。本 fork 仓库：[whybebabo/dsh-code-nav](https://github.com/whybebabo/dsh-code-nav)。
