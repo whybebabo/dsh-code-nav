@@ -1,16 +1,21 @@
 {
-  "name": "dsh-code-nav",
-  "version": "0.1.0",
-  "description": "DSH web plugin (dsh-better-sidebar companion): code file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable) and in-file search",
+  "name": "@whybebabo/dsh-code-nav",
+  "version": "0.1.1",
+  "description": "DSH web plugin (dsh-better-sidebar companion): code file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable), in-file search and selection -> add to conversation. Fork of AnakinCao/dsh-code-nav.",
   "type": "module",
   "main": "lib/index.js",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/AnakinCao/dsh-code-nav.git"
+    "url": "git+https://github.com/whybebabo/dsh-code-nav.git"
+  },
+  "homepage": "https://github.com/whybebabo/dsh-code-nav#readme",
+  "bugs": {
+    "url": "https://github.com/whybebabo/dsh-code-nav/issues"
   },
   "exports": {
     ".": "./lib/index.js",
     "./client": "./lib/client.js",
+    "./cordis.patch.yml": "./cordis.patch.yml",
     "./package.json": "./package.json"
   },
   "files": [
@@ -19,6 +24,9 @@
     "README.md",
     "README_EN.md"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
@@ -36,7 +44,9 @@
     "preview",
     "syntax-highlight",
     "outline",
-    "search"
+    "search",
+    "selection",
+    "conversation"
   ],
   "license": "MIT"
 }

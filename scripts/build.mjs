@@ -44,7 +44,23 @@ if (!template.includes(marker)) {
   console.error("[build] template marker not found:", marker);
   process.exit(1);
 }
-const out = template.replace(marker, wrapped);
+
+// 客户端 bundle 的注册 id 必须等于包名（client-modules 以包名作为 module
+// table key），所以从 package.json 注入而不是在模板里写死，避免改名后漂移。
+const NAME_TOKEN = "__CN_PACKAGE_NAME__";
+if (!template.includes(NAME_TOKEN)) {
+  console.error("[build] template name token not found:", NAME_TOKEN);
+  process.exit(1);
+}
+const pkgName = JSON.parse(readFileSync(join(ROOT, "package.json"), "utf8")).name;
+if (typeof pkgName !== "string" || pkgName === "") {
+  console.error("[build] package.json has no usable name");
+  process.exit(1);
+}
+
+const out = template
+  .replace(marker, wrapped)
+  .replaceAll(`"${NAME_TOKEN}"`, JSON.stringify(pkgName));
 mkdirSync(join(ROOT, "lib"), { recursive: true });
 writeFileSync(join(ROOT, "lib", "client.js"), out, "utf8");
-console.log(`[build] lib/client.js written (${out.length} bytes, ${EXPORTS.length} exports).`);
+console.log(`[build] lib/client.js written (${out.length} bytes, ${EXPORTS.length} exports, id "${pkgName}").`);
