@@ -25,12 +25,10 @@ DSH（DeepSeek Harness）Web 插件 —— **dsh-better-sidebar 代码预览导�
 ## 安装
 
 ```sh
-dsh plugin --profile desktop add @whybebabo/dsh-code-nav
+dsh plugin --profile web add @whybebabo/dsh-code-nav
 ```
 
-（把 `desktop` 换成你实际使用的 profile 名；`dsh web` 场景通常是 `web`。）
-
-装完**重启 dsh**（新增 bundle 需 host 侧重载），再硬刷新浏览器（Cmd/Ctrl+Shift+R）。
+装完**重启 `dsh web`**（新增 bundle 需 host 侧重载），再硬刷新浏览器（Cmd/Ctrl+Shift+R）。
 
 > 提示：better-sidebar 设置页「侧边卡片」中可看到本插件的预览器开关（代码预览导航 / Code Preview Navigator），关闭即回退到内置 CodeMirror 编辑器。
 

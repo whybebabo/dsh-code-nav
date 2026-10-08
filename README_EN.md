@@ -23,12 +23,12 @@ When you open a code file in the sidebar, it detects the language by file type a
 ## Install
 
 ```sh
-dsh plugin --profile desktop add @whybebabo/dsh-code-nav
+dsh plugin --profile web add @whybebabo/dsh-code-nav
 ```
 
-(Replace `desktop` with the profile you actually run; the `dsh web` scenario is usually `web`.)
+(Replace `web` with the profile you actually run.)
 
-Then **restart `dsh`** (a new bundle needs a host-side reload) and **hard-refresh** the browser (Cmd/Ctrl+Shift+R).
+Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-refresh** the browser (Cmd/Ctrl+Shift+R).
 
 > The plugin shows up as an enable/disable card in the better-sidebar settings ("Code Preview Navigator"); disabling it falls back to the built-in CodeMirror editor.
 

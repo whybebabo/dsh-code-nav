@@ -3,22 +3,25 @@
 # fork 自 AnakinCao/dsh-code-nav（详见 README 的 fork 来源与差异说明）。
 #
 # 安装方式（推荐）：
-#   dsh plugin --profile desktop add @whybebabo/dsh-code-nav
+#   dsh plugin --profile web add @whybebabo/dsh-code-nav
 #   dsh 会把这个包加入 dsh.profile.bundles，启动时由本补丁插入 loader entry
 #   并挂载客户端 bundle（client-modules 依据 entry.name 注册并下发）。
 #
 # 手动方式（备选）：
-#   在 ~/.dsh/profiles/<profile>/cordis.patch.yml 末尾追加：
+#   在 ~/.dsh/profiles/web/cordis.patch.yml 末尾追加：
 #     - insert:
 #         - id: dsh-code-nav
 #           name: '@whybebabo/dsh-code-nav'
-#   并把包复制到 ~/.dsh/profiles/<profile>/node_modules/@whybebabo/dsh-code-nav。
+#   并把包复制到 ~/.dsh/profiles/web/node_modules/@whybebabo/dsh-code-nav。
 #
 # 注意：
 #   - 两种方式二选一，勿重复注册。
 #   - 勿与上游 dsh-code-nav 同时安装：两者注册同一个预览器 id（dsh-code-nav:outline）。
 #   - loader entry 的 id 是本地行标识，保持短名即可；name 必须是完整包名，
 #     客户端 bundle 里的 __ModuleLoader__.load({ id }) 也要用完整包名（module table key）。
+#   - 桌面版（DeepSeek Harness.exe）的 profile 由 Electron 独占管理，
+#     `dsh plugin add` 会被拒（profile "desktop" is managed exclusively by the
+#     Electron application）；请在应用内插件页安装。
 - insert:
     - id: dsh-code-nav
       name: '@whybebabo/dsh-code-nav'
