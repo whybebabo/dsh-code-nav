@@ -5,7 +5,7 @@
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
 > 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2，已发布为
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)）
-> 与**常见配置文件支持**（v0.2.0，本仓库源码，尚未发布 npm）。
+> 与**常见配置文件支持**（v0.2.0，本仓库源码）。
 > 差异见下方[**Fork 说明**](#fork-说明)；v0.1.2 的改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -44,9 +44,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 @whybebabo/dsh-code-nav@0.2.0
 ```
 
-原因：pnpm 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— pnpm 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，pnpm 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
+原因：p 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— p 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，p 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
 
-写成精确版本后，范围内只剩一个候选，pnpm 会安装它并把该版本记入 `minimumReleaseAgeExclude`。或者等新版本发布满 24 小时后再用 `^` 升级。
+写成精确版本后，范围内只剩一个候选，p 会安装它并把该版本记入 `minimumReleaseAgeExclude`。或者等新版本发布满 24 小时后再用 `^` 升级。
 
 > 从 0.1.x 升到 0.2.0 是**纯新增**：只多了配置格式的识别与上色，代码文件的既有行为不变。
 
@@ -67,7 +67,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 配置文件支持 | ❌ 无（json / yaml / toml / xml 等落到内置查看器，无高亮与大纲） | ✅ JSON / YAML / TOML / XML / INI / properties / dotenv 的高亮 + 结构大纲 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
-| 版本 | 0.1.0（未发布 npm） | 0.2.0 |
+| 版本 | 0.1.0（未发布 ） | 0.2.0 |
 | 构建产物 id | 硬编码 `dsh-code-nav` | 由 `scripts/build.mjs` 从 `package.json` 注入，改名不再漂移 |
 | 其余（高亮 / 大纲 / 查找 / 语言表） | 同上 | **无差异**，与上游一致 |
 
