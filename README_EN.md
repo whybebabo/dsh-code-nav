@@ -4,7 +4,7 @@
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
 > (v0.1.2, published as
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav))
-> and **common config-file support** (v0.2.0, source in this repo).
+> and **common config-file support** (since v0.2.0, source in this repo).
 > See [**Fork notes**](#fork-notes) below; the v0.1.2 change is open upstream as PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
@@ -42,7 +42,7 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 Name an **exact** version instead of relying only on the `^` range:
 
 ```
-@whybebabo/dsh-code-nav@0.2.0
+@whybebabo/dsh-code-nav@0.2.1
 ```
 
 pnpm 11's supply-chain guard defaults to `minimumReleaseAge: 1440`, i.e. only versions published at least 24 hours ago are preferred. Because that is a **built-in default** rather than an explicit setting, `minimumReleaseAgeStrict` defaults to `false`: pnpm does not fail, it falls back to a version old enough to satisfy the age gate. So with `^0.1.1` still recorded, installing again resolves 0.1.1 (mature) over a newer release (too new) and **reports success while the installed version never changes**.
@@ -50,6 +50,10 @@ pnpm 11's supply-chain guard defaults to `minimumReleaseAge: 1440`, i.e. only ve
 Naming an exact version leaves a single candidate in range, which pnpm installs and records in `minimumReleaseAgeExclude`. Alternatively, wait 24 hours after a release before upgrading with a `^` range.
 
 > Going from 0.1.x to 0.2.0 is **purely additive**: config-format detection and colouring only; existing behaviour for code files is unchanged.
+>
+> 0.2.1 is a **fix release**: the style tag is now keyed by the full package name
+> (`data-plugin`), fixing a leaked `<style>` after uninstall / hot-replace that made
+> the UI pick up stale styling — see the last-but-one row of the fork table below.
 
 ## Fork notes
 
@@ -57,9 +61,9 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 
 **Why fork**: upstream registers its viewer with `priority: 10`, so for the extensions it handles the built-in `TextEditor` never mounts — and better-sidebar's "selection → add to conversation" popup lives inside `TextEditor` only, while the `betterSidebar` service exposes no selection / popup / draft API at all. Those files therefore lose the capability outright. Upstream has no such feature and there was a local need for it.
 
-**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support):
+**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support; v0.2.1 fixes style ownership):
 
-| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.2.0` |
+| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.2.1` |
 |---|---|---|
 | Selection → add to conversation | ❌ absent (lost once the viewer takes over) | ✅ floating button above the selection → inserts into the composer |
 | Insert payload | — | same shape as the built-in viewers: fenced block headed by `relative/path:start[-end]`; >500 chars inserts the path line only |
@@ -68,8 +72,9 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 | Popup dismissal | — | same contract as better-sidebar: outside mousedown / Escape / hidden document / blur / scroll / surface leaving the viewport |
 | Config-file support | ❌ none (json / yaml / toml / xml … fall to the built-in viewer, no highlighting or outline) | ✅ highlighting + structural outline for JSON / YAML / TOML / XML / INI / properties / dotenv |
 | Package name | `dsh-code-nav` | `@whybebabo/dsh-code-nav` (avoids claiming the upstream name) |
-| Version | 0.1.0 (not on npm) | 0.2.0 |
+| Version | 0.1.0 (not on npm) | 0.2.1 |
 | Built artifact id | hardcoded `dsh-code-nav` | injected by `scripts/build.mjs` from `package.json`, so a rename cannot drift |
+| `<style>` ownership tag | — | keyed by the **full package name** in `data-plugin` (fixed in v0.2.1): client-modules reclaims styles by package name on uninstall / hot-replace, so a short name leaks the `<style>` and stale styling bleeds into the UI |
 | Everything else (highlighting / outline / search / language table) | as above | **no difference from upstream** |
 
 
@@ -103,7 +108,7 @@ Non-code files (markdown / images / pdf …) keep using the built-in viewers.
 ## Development
 
 ```sh
-node test/code-nav.test.mjs   # unit tests (91 cases: tokenizer + per-language outline + config formats + search + selection payload + release-script derivation)
+node test/code-nav.test.mjs   # unit tests (92 cases: tokenizer + per-language outline + config formats + search + selection payload + release-script derivation + style ownership)
 node scripts/build.mjs        # inlines src/*.js into lib/client.js (no third-party bundler)
 node --check lib/client.js    # syntax check
 ```

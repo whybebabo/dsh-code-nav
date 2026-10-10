@@ -5,7 +5,7 @@
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
 > 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2，已发布为
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)）
-> 与**常见配置文件支持**（v0.2.0，本仓库源码）。
+> 与**常见配置文件支持**（v0.2.0 起，本仓库源码）。
 > 差异见下方[**Fork 说明**](#fork-说明)；v0.1.2 的改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -41,14 +41,17 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 已经装过本插件时，请**指定精确版本**，不要只依赖 `^` 范围：
 
 ```
-@whybebabo/dsh-code-nav@0.2.0
+@whybebabo/dsh-code-nav@0.2.1
 ```
 
-原因：p 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— p 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，p 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
+原因：pnpm 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— pnpm 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，pnpm 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
 
-写成精确版本后，范围内只剩一个候选，p 会安装它并把该版本记入 `minimumReleaseAgeExclude`。或者等新版本发布满 24 小时后再用 `^` 升级。
+写成精确版本后，范围内只剩一个候选，pnpm 会安装它并把该版本记入 `minimumReleaseAgeExclude`。或者等新版本发布满 24 小时后再用 `^` 升级。
 
 > 从 0.1.x 升到 0.2.0 是**纯新增**：只多了配置格式的识别与上色，代码文件的既有行为不变。
+>
+> 0.2.1 是**修复版**：样式标签改用完整包名标记（`data-plugin`），
+> 修掉卸载 / 热替换后 `<style>` 残留导致的界面串味 —— 详见下方 Fork 说明表的最后两行。
 
 ## Fork 说明
 
@@ -56,9 +59,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 **为什么 fork**：上游以 `priority: 10` 注册预览器，`.ts` 等扩展名被它接管后，内置 `TextEditor` 不再挂载 —— 而 better-sidebar 的「选中文字 → 添加到对话」浮层只实现在 `TextEditor` 内部，`betterSidebar` 服务面也没有任何选区 / 浮层 / 草稿 API，导致这些文件直接失去该能力。上游暂无此功能，且有本地使用需求。
 
-**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持）：
+**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持；v0.2.1 修样式归属）：
 
-| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.2.0` |
+| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.2.1` |
 |---|---|---|
 | 选中文字 → 添加到对话 | ❌ 无（接管后该能力消失） | ✅ 选区上方浮层按钮 → 插入会话输入框 |
 | 插入载荷 | — | 与 better-sidebar 内置查看器同形状：`相对路径:起止行` 围栏块；>500 字只插路径行 |
@@ -67,8 +70,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 配置文件支持 | ❌ 无（json / yaml / toml / xml 等落到内置查看器，无高亮与大纲） | ✅ JSON / YAML / TOML / XML / INI / properties / dotenv 的高亮 + 结构大纲 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
-| 版本 | 0.1.0（未发布 ） | 0.2.0 |
+| 版本 | 0.1.0（未发布 npm） | 0.2.1 |
 | 构建产物 id | 硬编码 `dsh-code-nav` | 由 `scripts/build.mjs` 从 `package.json` 注入，改名不再漂移 |
+| `<style>` 归属标记 | — | 以**完整包名**标记 `data-plugin`（v0.2.1 修）：client-modules 卸载 / 热替换时按包名回收样式，短名会让 `<style>` 残留、界面串味 |
 | 其余（高亮 / 大纲 / 查找 / 语言表） | 同上 | **无差异**，与上游一致 |
 
 
@@ -102,7 +106,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 ## 开发
 
 ```sh
-node test/code-nav.test.mjs   # 纯逻辑单测（91 例：分词 + 各语言大纲 + 配置格式 + 查找 + 选区载荷 + 发布脚本派生）
+node test/code-nav.test.mjs   # 纯逻辑单测（92 例：分词 + 各语言大纲 + 配置格式 + 查找 + 选区载荷 + 发布脚本派生 + 样式归属）
 node scripts/build.mjs        # 把 src/*.js 内联进 lib/client.js（无第三方 bundler）
 node --check lib/client.js    # 语法校验
 ```

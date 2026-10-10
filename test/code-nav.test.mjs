@@ -1404,6 +1404,36 @@ test("built client bundle wires search and outline through the render window", (
   }
 });
 
+test("built client bundle keys its <style> tag by the full package name", () => {
+  // client-modules 的 HMR 记账以**包名**为 key：失效/替换一个插件时它调用
+  // removeOwnedStyles(id)，即删掉 data-plugin === <包名> 的 <style>。若这里写成
+  // 短名（曾为 "dsh-code-nav"），那条查询永远匹配不到本插件的标签，卸载/HMR 后
+  // 样式表会遗留在 document.head 里越积越多 —— 表现为「界面串味、要重启才干净」。
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const bundle = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  assert.equal(pkg.name, "@whybebabo/dsh-code-nav", "包名变了，下面的断言要一起改");
+  // 注册 id 与样式归属 key 都必须是完整包名
+  assert.ok(
+    bundle.includes(`id: ${JSON.stringify(pkg.name)}`),
+    "bundle 未用完整包名注册（__ModuleLoader__.load 的 id）"
+  );
+  assert.ok(
+    bundle.includes(`tag.dataset.plugin = PACKAGE_NAME`) || bundle.includes(`dataset.plugin = ${JSON.stringify(pkg.name)}`),
+    "样式标签未用完整包名标记 data-plugin"
+  );
+  assert.ok(
+    bundle.includes(`"${pkg.name}/styles.css"`) || bundle.includes(`PACKAGE_NAME + "/styles.css"`),
+    "样式标签的 data-plugin-css 未以完整包名开头"
+  );
+  // 短名不能再出现在 data-plugin 赋值里
+  assert.ok(
+    !/dataset\.plugin = "dsh-code-nav"/.test(bundle),
+    "样式标签仍以短名标记，HMR 无法回收该 <style>"
+  );
+  // 构建令牌必须已被替换（模板改了忘了 build 时立刻失败）
+  assert.ok(!bundle.includes("__CN_PACKAGE_NAME__"), "bundle 残留未替换的包名令牌");
+});
+
 test("README states the real test count", () => {
   // README 里的「N 例 / N cases」曾经过期（写 61、实际更多）。
   // 直接数本文件的顶层 test() 数量（与 node:test 的计数一致），再和 README 对齐，
