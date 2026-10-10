@@ -1,9 +1,13 @@
 // 设置 GitHub 仓库 topics（合并式：保留已有 + 新增缺失）。
+// 目标仓库从 package.json 的 repository.url 派生（曾经写死上游 AnakinCao/dsh-code-nav，
+// 在 fork 里会改到上游仓库上）。
 // 凭据经 `git credential fill` 进程内获取；沙箱阻断 GCM 凭据管道，须 danger-full-access 运行。
 // 用法：node scripts/repo-topics.mjs [topic...]
 import { execFileSync } from "node:child_process";
+import { readPkg, repoOf } from "./release-config.mjs";
 
-const REPO = "AnakinCao/dsh-code-nav";
+const pkg = readPkg();
+const REPO = repoOf(pkg);   // 例：whybebabo/dsh-code-nav
 const DESIRED = (process.argv.slice(2).length > 0 ? process.argv.slice(2) : [
   "dsh-better-sidebar",
   "dsh",
@@ -15,6 +19,7 @@ const DESIRED = (process.argv.slice(2).length > 0 ? process.argv.slice(2) : [
   "code-navigation",
   "plugin",
 ]);
+console.log("target repo:", REPO);
 
 let token;
 try {

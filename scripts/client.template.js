@@ -67,6 +67,10 @@ window.__ModuleLoader__.load({
 			".cn-code-wrap .cn-n{color:var(--cn-num)}",
 			".cn-code-wrap .cn-f{color:var(--cn-fn)}",
 			".cn-code-wrap .cn-i{color:var(--cn-ident)}",
+			".cn-code-wrap .cn-key{color:var(--cn-key)}",
+			".cn-code-wrap .cn-sec{color:var(--cn-section)}",
+			".cn-code-wrap .cn-tag{color:var(--cn-tag)}",
+			".cn-code-wrap .cn-attr{color:var(--cn-attr)}",
 			".cn-code-wrap .cn-m{background:var(--cn-match-bg);border-radius:2px}",
 			".cn-code-wrap .cn-cu{background:var(--cn-match-cur);outline:1px solid var(--cn-match-cur);border-radius:2px}",
 			".cn-plain{white-space:pre;padding:8px 12px;color:var(--cn-ident);font-family:var(--ds-font-family-code,monospace);font-size:12px;line-height:18px}",
@@ -469,6 +473,7 @@ window.__ModuleLoader__.load({
 			"selection.add": "添加到对话",
 			"selection.conflict": "输入框正忙或草稿已改动，请再点一次",
 			"truncated": "文件过大，仅显示前 500KB",
+			"lineCapped": "文件过长，仅渲染前 {n} 行（共 {total} 行）：查找与大纲只覆盖已渲染的行",
 			"lang.unknown": "未知类型"
 		};
 		const en = {
@@ -488,6 +493,7 @@ window.__ModuleLoader__.load({
 			"selection.add": "Add to conversation",
 			"selection.conflict": "The composer is busy or the draft changed — click again",
 			"truncated": "File too large — showing first 500KB",
+			"lineCapped": "File is long — only the first {n} of {total} lines are rendered; find and outline cover rendered lines only",
 			"lang.unknown": "Unknown"
 		};
 		//#endregion
@@ -496,7 +502,9 @@ window.__ModuleLoader__.load({
 		const KIND_META = {
 			class: "C", interface: "I", struct: "S", enum: "E", impl: "I",
 			trait: "T", method: "M", function: "F", constructor: "C",
-			variable: "V", field: "F", constant: "K"
+			variable: "V", field: "F", constant: "K",
+			// 配置文件：段 / 键 / XML 元素 / XML 属性
+			section: "§", key: "K", element: "E", attribute: "A"
 		};
 		const FILTERS = ["all", "class", "method", "variable"];
 
@@ -506,6 +514,7 @@ window.__ModuleLoader__.load({
 				fg: "#e8e8e8", plain: "#d4d4d4", ident: "#d4d4d4",
 				comment: "#6a9955", string: "#ce9178", kw: "#569cd6",
 				type: "#4ec9b0", num: "#b5cea8", fn: "#dcdcaa",
+				key: "#9cdcfe", section: "#c586c0", tag: "#569cd6", attr: "#9cdcfe",
 				ln: "#6e6e6e", dim: "#9a9a9a", dim3: "#6e6e6e",
 				border: "rgba(255,255,255,.14)", badgeBg: "rgba(255,255,255,.08)", badgeFg: "#b8d7ff",
 				accent: "#4da3ff", accentBg: "rgba(77,163,255,.14)",
@@ -517,6 +526,7 @@ window.__ModuleLoader__.load({
 				fg: "#1f1f1f", plain: "#1f1f1f", ident: "#1f1f1f",
 				comment: "#008000", string: "#a31515", kw: "#0000ff",
 				type: "#267f99", num: "#098658", fn: "#795e26",
+				key: "#0451a5", section: "#af00db", tag: "#0000ff", attr: "#0451a5",
 				ln: "#9c9c9c", dim: "#6f6f6f", dim3: "#a0a0a0",
 				border: "rgba(0,0,0,.16)", badgeBg: "rgba(38,127,153,.1)", badgeFg: "#0b5c70",
 				accent: "#0b6fd6", accentBg: "rgba(11,111,214,.1)",
@@ -677,9 +687,26 @@ window.__ModuleLoader__.load({
 			const lang = react.useMemo(() => __cn.langOf(path), [path]);
 			const langLabel = __cn.langLabel(lang);
 			const tokens = react.useMemo(() => (typeof content === "string" ? __cn.tokenizeLines(content, lang) : null), [content, lang]);
-			const symbols = react.useMemo(() => (typeof content === "string" ? __cn.outlineOf(content, lang) : []), [content, lang]);
-			const matches = react.useMemo(() => (typeof content === "string" ? __cn.findMatches(content, query, { caseSensitive }) : []), [content, query, caseSensitive]);
+			// 渲染窗口是「能跳转的行号范围」的唯一来源：搜索与大纲都按它裁剪，
+			// 否则窗口外的匹配会被计入 n/m、窗口外的符号会出现在列表里却点不动。
+			const renderedCount = react.useMemo(
+				() => __cn.renderedLineCount(tokens === null ? 0 : tokens.length),
+				[tokens]
+			);
+			const symbols = react.useMemo(() => {
+				if (typeof content !== "string") return [];
+				return __cn.clipToRenderWindow(__cn.outlineOf(content, lang), renderedCount);
+			}, [content, lang, renderedCount]);
+			const matches = react.useMemo(() => {
+				if (typeof content !== "string") return [];
+				return __cn.clipZeroBasedToRenderWindow(
+					__cn.findMatches(content, query, { caseSensitive }),
+					renderedCount
+				);
+			}, [content, query, caseSensitive, renderedCount]);
 			const curIndex = matches.length > 0 ? Math.min(cur, matches.length - 1) : -1;
+			// 内容行数超出渲染窗口：文件被截断显示，搜索与大纲只覆盖窗口内
+			const lineCapped = tokens !== null && renderedCount < tokens.length;
 
 			/** 行 → 该行匹配区间表。 */
 			const lineMatches = react.useMemo(() => {
@@ -746,7 +773,7 @@ window.__ModuleLoader__.load({
 			}
 
 			const rows = [];
-			const maxLines = Math.min(tokens !== null ? tokens.length : 0, 20000);
+			const maxLines = renderedCount;
 			for (let i = 0; i < maxLines; i++) {
 				const raw = tokens[i].raw;
 				const lm = lineMatches.get(i);
@@ -759,7 +786,7 @@ window.__ModuleLoader__.load({
 				const lineNodes = [];
 				for (let s = 0; s < spans.length; s++) {
 					const sp = spans[s];
-					const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : "";
+					const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : sp.cls === "c-key" ? "cn-key" : sp.cls === "c-section" ? "cn-sec" : sp.cls === "c-tag" ? "cn-tag" : sp.cls === "c-attr" ? "cn-attr" : "";
 					const extra = sp.match ? (sp.current ? " cn-cu" : " cn-m") : "";
 					lineNodes.push(jsx("span", { key: s, className: cls + extra, "data-cn-cur": sp.current ? "1" : undefined, children: sp.text }));
 				}
@@ -870,6 +897,9 @@ window.__ModuleLoader__.load({
 						]
 					}),
 					truncated === true ? jsx("div", { className: "cn-warn", children: t("truncated") }) : null,
+					lineCapped === true
+						? jsx("div", { className: "cn-warn", children: t("lineCapped").replace("{n}", String(renderedCount)).replace("{total}", String(tokens.length)) })
+						: null,
 					jsxs("div", {
 						className: "cn-body",
 						ref: codeRef,

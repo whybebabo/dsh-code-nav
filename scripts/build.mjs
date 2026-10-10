@@ -5,22 +5,32 @@
  *
  * 用法：node scripts/build.mjs
  */
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
-const MODULES = ["lang-registry", "tokenize", "outline", "search", "selection"];
+const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "render-window"];
 const EXPORTS = [
   "langOf", "langLabel", "LANG_EXT", "LANG_META",
   "tokenizeLines", "outlineOf", "kindGroup",
   "findMatches", "spansOfLine",
-  "SELECTION_LIMIT", "selectionHeader", "buildSelectionInsert"
+  "SELECTION_LIMIT", "selectionHeader", "buildSelectionInsert",
+  "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow",
+  "clipToRenderWindow", "clipZeroBasedToRenderWindow"
 ];
 
 const parts = [];
 for (const name of MODULES) {
-  const src = readFileSync(join(ROOT, "src", name + ".js"), "utf8");
+  const file = join(ROOT, "src", name + ".js");
+  if (!existsSync(file)) {
+    // 缺源文件时给出可行动的提示（而不是裸 ENOENT）：新加的模块必须随
+    // package.json 的 files / 版本控制一起提交，否则别的检出环境无法构建。
+    console.error(`[build] missing source module: src/${name}.js`);
+    console.error("[build] MODULES requires every file to be committed (git add src/" + name + ".js and un-ignore it)");
+    process.exit(1);
+  }
+  const src = readFileSync(file, "utf8");
   const stripped = src
     .replace(/^export\s+/gm, "")
     .replace(/^import\s+[^\n]+from\s+"[^"]+";?\s*$/gm, "")
@@ -32,7 +42,7 @@ for (const name of MODULES) {
 const wrapped = [
   "const __cn = (() => {",
   '	"use strict";',
-  ...parts.map((p) => p.split("\n").map((l) => "\t" + l).join("\n")),
+  ...parts.map((p) => p.split("\n").map((l) => /^\s*$/.test(l) ? "" : "\t" + l).join("\n")),
   `\treturn { ${EXPORTS.join(", ")} };`,
   "})();",
   ""

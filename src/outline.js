@@ -4,12 +4,17 @@
  * 基于 tokenizeLines 的结果剥离注释/字符串后，对"干净行"跑每语言规则，
  * 输出：{ kind, name, line, container? }（line 为 1 基）。
  * kind: class | interface | struct | enum | impl | trait | method | function |
- *       constructor | variable | field | constant
+ *       constructor | variable | field | constant | section | key | element |
+ *       attribute
  * 构建时由 scripts/build.mjs 内联进 lib/client.js（import/export 行被剥离）。
  */
 
 import { LANG_META } from "./lang-registry.js";
 import { tokenizeLines } from "./tokenize.js";
+import { outlineOfConfig } from "./config-outline.js";
+
+/** 配置文件语言 id（走 config-outline.js 的提取器，而不是括号/缩进规则）。 */
+const CONFIG_LANGS = new Set(["json", "yaml", "toml", "xml", "ini", "properties", "dotenv"]);
 
 /** kind → 筛选分组（全部 / 类 / 方法 / 变量）。 */
 export function kindGroup(kind) {
@@ -20,6 +25,13 @@ export function kindGroup(kind) {
       return "method";
     case "variable": case "field": case "constant":
       return "variable";
+    // 配置语言：段头（对象 / 表 / 元素层级）归「类」，键与属性归「变量」
+    case "section":
+      return "class";
+    case "key": case "attribute":
+      return "variable";
+    case "element":
+      return "class";
     default:
       return "other";
   }
@@ -258,7 +270,11 @@ export function outlineOf(text, lang) {
     const meta = LANG_META[lang];
     const kws = KWS_OF(lang);
     let out;
-    if (lang === "python") {
+    if (CONFIG_LANGS.has(lang)) {
+      // 用 tokenize 之后的文本（可能已按防御性上限截断），保证 JSON 扫描器与
+      // 其余提取器、以及渲染出的行号三者看到的是同一份内容
+      out = outlineOfConfig(tokens.map((t) => t.raw).join("\n"), lang, tokens, lineCount);
+    } else if (lang === "python") {
       out = extractPython(tokens, lineCount);
     } else if (lang === "go") {
       out = extractGo(tokens, lineCount);
