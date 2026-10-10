@@ -2,9 +2,9 @@
 
 > **This is a fork of [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav).**
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
-> (v0.1.2, published as
-> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav))
-> and **common config-file support** (since v0.2.0, source in this repo).
+> (since v0.1.2) and **common config-file support** (since v0.2.0), published to npm as
+> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
+> (current version **0.2.1**).
 > See [**Fork notes**](#fork-notes) below; the v0.1.2 change is open upstream as PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
@@ -29,7 +29,9 @@ When you open a code file in the sidebar, it detects the language by file type a
 dsh plugin --profile web add @whybebabo/dsh-code-nav
 ```
 
-(Replace `web` with the profile you actually run.)
+This plugin is **web-only** (`dsh.profile.client.platform` is `web`). Use the `web`
+profile: the `desktop` profile is owned exclusively by the Electron app and rejects
+the CLI (`error: profile "desktop" is managed exclusively by the Electron application`).
 
 Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-refresh** the browser (Cmd/Ctrl+Shift+R).
 
@@ -72,7 +74,7 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 | Popup dismissal | — | same contract as better-sidebar: outside mousedown / Escape / hidden document / blur / scroll / surface leaving the viewport |
 | Config-file support | ❌ none (json / yaml / toml / xml … fall to the built-in viewer, no highlighting or outline) | ✅ highlighting + structural outline for JSON / YAML / TOML / XML / INI / properties / dotenv |
 | Package name | `dsh-code-nav` | `@whybebabo/dsh-code-nav` (avoids claiming the upstream name) |
-| Version | 0.1.0 (not on npm) | 0.2.1 |
+| Version | 0.1.0 (not on npm) | 0.2.1 (published to npm) |
 | Built artifact id | hardcoded `dsh-code-nav` | injected by `scripts/build.mjs` from `package.json`, so a rename cannot drift |
 | `<style>` ownership tag | — | keyed by the **full package name** in `data-plugin` (fixed in v0.2.1): client-modules reclaims styles by package name on uninstall / hot-replace, so a short name leaks the `<style>` and stale styling bleeds into the UI |
 | Everything else (highlighting / outline / search / language table) | as above | **no difference from upstream** |

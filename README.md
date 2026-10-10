@@ -3,9 +3,10 @@
 <div align="center">🌏 <a href="./README_EN.md"><b>English</b></a> · 中文</div>
 
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
-> 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2，已发布为
-> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)）
-> 与**常见配置文件支持**（v0.2.0 起，本仓库源码）。
+> 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2 起）与
+> **常见配置文件支持**（v0.2.0 起），并以
+> [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
+> 发布到 npm（当前版本 **0.2.1**）。
 > 差异见下方[**Fork 说明**](#fork-说明)；v0.1.2 的改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -31,6 +32,10 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 ```
 
 装完**重启 `dsh web`**（新增 bundle 需 host 侧重载），再硬刷新浏览器（Cmd/Ctrl+Shift+R）。
+
+> 本插件**仅支持 web**（`dsh.profile.client.platform` 为 `web`）。请用 `web` profile：
+> `desktop` profile 由 Electron 应用独占，CLI 会被拒绝
+> （`error: profile "desktop" is managed exclusively by the Electron application`）。
 
 > 提示：better-sidebar 设置页「侧边卡片」中可看到本插件的预览器开关（代码预览导航 / Code Preview Navigator），关闭即回退到内置 CodeMirror 编辑器。
 
@@ -70,7 +75,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 配置文件支持 | ❌ 无（json / yaml / toml / xml 等落到内置查看器，无高亮与大纲） | ✅ JSON / YAML / TOML / XML / INI / properties / dotenv 的高亮 + 结构大纲 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
-| 版本 | 0.1.0（未发布 npm） | 0.2.1 |
+| 版本 | 0.1.0（未发布 npm） | 0.2.1（已发布 npm） |
 | 构建产物 id | 硬编码 `dsh-code-nav` | 由 `scripts/build.mjs` 从 `package.json` 注入，改名不再漂移 |
 | `<style>` 归属标记 | — | 以**完整包名**标记 `data-plugin`（v0.2.1 修）：client-modules 卸载 / 热替换时按包名回收样式，短名会让 `<style>` 残留、界面串味 |
 | 其余（高亮 / 大纲 / 查找 / 语言表） | 同上 | **无差异**，与上游一致 |
