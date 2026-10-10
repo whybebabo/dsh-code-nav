@@ -4,7 +4,7 @@
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
 > (v0.1.2, published as
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav))
-> and **common config-file support** (v0.2.0, source in this repo, not yet on npm).
+> and **common config-file support** (v0.2.0, source in this repo).
 > See [**Fork notes**](#fork-notes) below; the v0.1.2 change is open upstream as PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
