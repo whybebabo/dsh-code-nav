@@ -1,0 +1,43 @@
+name: CI
+
+# 这个仓库没有第三方构建依赖，CI 只需要 node。跑四件事，每一件都对应一个
+# 「本地能过、线上却坏掉」的真实场景：
+#   build      —— src/*.js 内联进模板；模板或源码改动忘了构建时先炸在这里
+#   check      —— 产物是拼出来的共享作用域，语法错误必须在发布前发现
+#   test       —— 纯逻辑单测 + 「committed 产物 == 新鲜构建」的一致性断言
+#   pack dryrun —— 发布脚本的目标仓库 / 版本 / 产物名全部从 package.json 派生，
+#                dry-run 能在不写远端的前提下确认这套派生还成立
+on:
+  push:
+  pull_request:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build client bundle
+        run: node scripts/build.mjs
+
+      - name: Syntax-check the bundle
+        run: node --check lib/client.js
+
+      - name: Unit tests
+        run: node test/code-nav.test.mjs
+
+      - name: Fail if the committed bundle is stale
+        # 单测里已有同样的逐字比对，这里是第二道更直白的门：上一步刚构建过，
+        # 工作区还出 diff 就说明提交里的 lib/client.js 不是由当前 src/ 模板产生的。
+        run: git diff --exit-code -- lib/client.js
+
+      - name: Release plan (dry run: packs the artifact, writes nothing remote)
+        # 发布脚本的目标仓库 / 版本 / tag / 产物名全部从 package.json 派生；
+        # --dry-run 会在取凭据之前退出，所以这里既验证派生也验证产物前置条件。
+        run: |
+          npm pack --silent
+          node scripts/release-code-nav.mjs --dry-run

@@ -5,10 +5,26 @@
  * 共享作用域约定见 lang-registry.js 文件头。
  */
 
-const MAX_MATCHES = 2000;
+/** 单次查找返回的匹配上限（界面据此提示「还有更多」，避免看起来只有 2000 处）。 */
+export const MAX_MATCHES = 2000;
+
+/**
+ * 转义正则元字符，让查询串按字面量匹配。
+ * @param {string} s
+ * @returns {string}
+ */
+function escapeRegExp(s) {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 /**
  * 在文本中查找 query 的全部出现位置。
+ *
+ * 匹配走正则而不是「小写化后再 indexOf」：`toLowerCase()` 对个别字符会**改变码元数**
+ * （`İ` U+0130 → `i` + 组合上的一点），于是小写串里的下标不再等于原文下标 ——
+ * 按它切高亮区间会串位，按它回查原文又会把 İ 之后的普通匹配整片丢掉。正则直接在原文
+ * 上匹配，start/end 天然就是原文坐标；代价是个别大小写折叠对（İ/i）不再互相命中，
+ * 这是可接受的保守取舍。
  * @param {string} text
  * @param {string} query 空串返回 []
  * @param {{ caseSensitive?: boolean }} opts
@@ -16,16 +32,13 @@ const MAX_MATCHES = 2000;
  */
 export function findMatches(text, query, opts = {}) {
   if (typeof text !== "string" || typeof query !== "string" || query.length === 0) return [];
-  const caseSensitive = opts.caseSensitive === true;
-  const hay = caseSensitive ? text : text.toLowerCase();
-  const needle = caseSensitive ? query : query.toLowerCase();
+  const re = new RegExp(escapeRegExp(query), opts.caseSensitive === true ? "g" : "gi");
   const out = [];
-  let idx = 0;
   let line = 0;
   let lineStart = 0;
-  while (out.length < MAX_MATCHES) {
-    const at = hay.indexOf(needle, idx);
-    if (at === -1) break;
+  let m;
+  while (out.length < MAX_MATCHES && (m = re.exec(text)) !== null) {
+    const at = m.index;
     // 计算 at 所在行（增量扫描）
     while (lineStart <= at) {
       const nl = text.indexOf("\n", lineStart);
@@ -33,8 +46,9 @@ export function findMatches(text, query, opts = {}) {
       line++;
       lineStart = nl + 1;
     }
-    out.push({ start: at, end: at + needle.length, line, col: at - lineStart });
-    idx = at + Math.max(needle.length, 1);
+    out.push({ start: at, end: at + m[0].length, line, col: at - lineStart });
+    // 查询串非空且已全部转义成字面量，匹配长度必然 >= 1；这里只是防止 lastIndex 卡住。
+    if (re.lastIndex === at) re.lastIndex = at + 1;
   }
   return out;
 }

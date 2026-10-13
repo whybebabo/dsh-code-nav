@@ -1,10 +1,10 @@
 // 设置 GitHub 仓库 topics（合并式：保留已有 + 新增缺失）。
 // 目标仓库从 package.json 的 repository.url 派生（曾经写死上游 AnakinCao/dsh-code-nav，
 // 在 fork 里会改到上游仓库上）。
-// 凭据经 `git credential fill` 进程内获取；沙箱阻断 GCM 凭据管道，须 danger-full-access 运行。
+// 凭据经 git credential fill 进程内获取（见 release-config.mjs 的 readGithubToken）；
+// 沙箱阻断 GCM 凭据管道，须 danger-full-access 运行。token 只在内存里用，不写盘、不进日志。
 // 用法：node scripts/repo-topics.mjs [topic...]
-import { execFileSync } from "node:child_process";
-import { readPkg, repoOf } from "./release-config.mjs";
+import { readPkg, repoOf, readGithubToken } from "./release-config.mjs";
 
 const pkg = readPkg();
 const REPO = repoOf(pkg);   // 例：whybebabo/dsh-code-nav
@@ -23,17 +23,11 @@ console.log("target repo:", REPO);
 
 let token;
 try {
-  const out = execFileSync("git", ["credential", "fill"], {
-    input: "protocol=https\nhost=github.com\n\n",
-    encoding: "utf8",
-  });
-  const m = out.match(/^password=(.+)$/m);
-  if (m) token = m[1].trim();
+  token = readGithubToken();
 } catch (e) {
-  console.error("cred fill failed:", e.message.split("\n")[0]);
+  console.error("[topics] " + e.message);
   process.exit(1);
 }
-if (!token) { console.error("no token"); process.exit(1); }
 
 const headers = {
   Authorization: "Bearer " + token,

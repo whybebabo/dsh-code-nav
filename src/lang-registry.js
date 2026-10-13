@@ -283,8 +283,3 @@ export function langLabel(lang) {
   const meta = LANG_META[lang];
   return meta ? meta.label : (lang ?? "Text");
 }
-
-/** 是否为已知代码语言（有高亮元数据）。 */
-export function isCodeLang(lang) {
-  return lang != null && Object.prototype.hasOwnProperty.call(LANG_META, lang);
-}

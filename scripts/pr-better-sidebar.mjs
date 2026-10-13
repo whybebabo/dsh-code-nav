@@ -1,6 +1,9 @@
 // 向 omdsh-dev/DSH-better-sidebar 提交「推荐文件预览插件目录」PR（dsh-code-nav）。
 // 流程：本地校验并提交（clone 缺失时自动 clone 上游）→ fork（api.github.com）→ push fork → 创建 PR。
-// 凭据经 git credential fill 进程内获取；须 danger-full-access 运行。
+// 用法：node scripts/pr-better-sidebar.mjs [--dry-run]
+//   --dry-run 只打印计划与本地状态，不 clone、不提交、不 fork、不推送、不建 PR。
+// 凭据经 git credential fill 进程内获取（见 release-config.mjs 的 readGithubToken）；
+// 须 danger-full-access 运行。token 只在内存里用，不写盘、不进日志。
 //
 // 待提交的三个文件由人工在 clone 工作区里准备好；脚本只负责提交与推送，
 // 绝不 `git reset --hard`（那会删掉正是要提交的未提交改动）。
@@ -11,7 +14,9 @@ import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { existsSync, mkdirSync } from "node:fs";
-import { readPkg, repoOf } from "./release-config.mjs";
+import { readPkg, repoOf, readGithubToken } from "./release-config.mjs";
+
+const DRY = process.argv.slice(2).includes("--dry-run");
 
 const pkg = readPkg();
 const PLUGIN_REPO = repoOf(pkg);                                   // whybebabo/dsh-code-nav
@@ -21,21 +26,27 @@ const FORK = process.env.DSH_BS_FORK || (OWNER + "/DSH-better-sidebar");
 const BRANCH = "feat/dsh-code-nav-catalog";
 // 临时克隆目录：默认落在系统临时目录（不再写死某台机器的固定盘符路径）
 const CLONE = process.env.DSH_BS_CLONE || join(tmpdir(), ".tmp-bs-clone");
+/** 脚本要提交的三个文件（也是 dry-run 要检查的改动）。 */
+const PATCH_FILES = ["src/client/plugins-viewers.ts", "src/client/locales.ts", "src/client/locales-ja.ts"];
 console.log("plugin repo:", PLUGIN_REPO, "| better-sidebar fork:", FORK, "| clone:", CLONE);
+console.log("mode:", DRY ? "DRY RUN（不 clone、不提交、不推送、不建 PR）" : "LIVE");
+
+if (DRY) {
+  // 只报本地能看到的状态；连 clone 都不做（dry-run 不该产生任何写入，包括首次克隆）。
+  console.log("upstream:", UPSTREAM, "| branch:", BRANCH);
+  console.log("files:", PATCH_FILES.join(", "));
+  console.log(existsSync(CLONE) ? "clone 目录已存在: " + CLONE : "clone 目录不存在（真跑时会自动克隆）");
+  console.log("[pr] dry run 计划校验通过，未做任何写入。");
+  process.exit(0);
+}
 
 let token;
 try {
-  const out = execFileSync("git", ["credential", "fill"], {
-    input: "protocol=https\nhost=github.com\n\n",
-    encoding: "utf8",
-  });
-  const m = out.match(/^password=(.+)$/m);
-  if (m) token = m[1].trim();
+  token = readGithubToken();
 } catch (e) {
-  console.error("cred fill failed:", e.message.split("\n")[0]);
+  console.error("[pr] " + e.message);
   process.exit(1);
 }
-if (!token) { console.error("no token"); process.exit(1); }
 
 const H = {
   Authorization: "Bearer " + token,
@@ -55,8 +66,6 @@ function sh(cmd, args) {
 
 // 1) 先做**纯本地**的前置校验与提交准备（不产生任何远端写入）
 const UPSTREAM_URL = "https://github.com/" + UPSTREAM + ".git";
-// 本脚本要提交的三个文件，改动由人工在此 clone 的工作区里准备好
-const PATCH_FILES = ["src/client/plugins-viewers.ts", "src/client/locales.ts", "src/client/locales-ja.ts"];
 
 /** 执行并返回 stdout；失败返回 null（用于「只想知道成不成」的查询）。 */
 function gitQ(args) {

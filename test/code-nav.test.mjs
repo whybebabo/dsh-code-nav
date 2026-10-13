@@ -1,13 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { langOf, LANG_EXT, LANG_META } from "../src/lang-registry.js";
 import { tokenizeLines } from "../src/tokenize.js";
-import { outlineOf, kindGroup } from "../src/outline.js";
-import { findMatches, spansOfLine } from "../src/search.js";
+import { outlineOf, kindGroup, OUTLINE_MAX_SYMBOLS } from "../src/outline.js";
+import { findMatches, spansOfLine, MAX_MATCHES } from "../src/search.js";
 import { SELECTION_LIMIT, selectionHeader, buildSelectionInsert } from "../src/selection.js";
 import { RENDER_MAX_LINES, renderedLineCount, inRenderWindow, clipToRenderWindow, clipZeroBasedToRenderWindow } from "../src/render-window.js";
-import { propertiesKeyEnd, isPropertiesBareKeyLine, propertiesKeySlice, unescapePropertyKey } from "../src/properties-key.js";
+import { propertiesKeyEnd, propertiesKeySlice, unescapePropertyKey } from "../src/properties-key.js";
+import { buildBundle, findCollisions, stripModule, topLevelNames, cnUsage, MODULES, EXPORTS } from "../scripts/build.mjs";
 
 /** Java properties 里的字面反斜杠（避免在字符串转义里数不清个数）。 */
 const BS = String.fromCharCode(92);
@@ -593,12 +596,54 @@ export default {
     return { msg: "hi" };
   }
 };
+function makeThing() {}
 </script>
 `;
   const s = outlineOf(code, "vue");
-  // data 是对象方法（不要求），但至少不应崩溃，且行号偏移正确
-  assert.ok(Array.isArray(s));
-  for (const x of s) assert.ok(x.line >= 1);
+  // 行号必须落在整个文件（不是 <script> 片段）的坐标上：`function makeThing` 在
+  // 模板之后，偏移算错就会跳到别的行。
+  assert.deepEqual(symList(s), ["method:data", "function:makeThing"]);
+  assert.equal(s[s.length - 1].line, 11, "SFC 里的 JS 符号行号未回加 <script> 的起始偏移");
+});
+
+test("outline vue: both <script> and <script setup> are parsed", () => {
+  // 一个 SFC 里同时写普通 <script> 与 <script setup> 是常规用法；只取第一个块时
+  // 另一半符号会凭空消失（且 <script setup lang="ts"> 的类型也读不到）。
+  const code = `<template>
+  <p>{{ a }}</p>
+</template>
+<script>
+function plainFn() {}
+</script>
+<script setup lang="ts">
+interface Props { a: string }
+const comp = defineComponent({})
+</script>
+<style scoped>
+.p { color: red }
+</style>
+`;
+  assert.deepEqual(
+    symList(outlineOf(code, "vue")),
+    ["function:plainFn", "interface:Props", "variable:comp"],
+    "多 <script> 块未按文件顺序合并，或 lang=\"ts\" 块没按 TypeScript 解析"
+  );
+  const lines = outlineOf(code, "vue").map((x) => x.line);
+  assert.deepEqual(lines, [5, 8, 9], "各块的行号偏移不对");
+});
+
+test("outline svelte: script block line offset", () => {
+  const code = `<script>
+  function hello(name) { return "hi " + name }
+</script>
+<h1>{hello("x")}</h1>
+<style>
+  h1 { color: teal }
+</style>
+`;
+  const s = outlineOf(code, "svelte");
+  assert.deepEqual(symList(s), ["function:hello"]);
+  assert.equal(s[0].line, 2);
 });
 
 test("outline sql: tables", () => {
@@ -612,6 +657,14 @@ CREATE VIEW active_users AS SELECT * FROM users;
   const names = s.map((x) => x.kind + ":" + x.name);
   assert.ok(names.includes("class:users"));
   assert.ok(names.includes("interface:active_users"));
+});
+
+test("outline: symbol count is capped at OUTLINE_MAX_SYMBOLS", () => {
+  // 上限本身是静默的，客户端靠它给提示（symbols.capped），所以常量必须导出且真的生效
+  const code = Array.from({ length: OUTLINE_MAX_SYMBOLS + 40 }, (_, i) => "function f" + i + "() {}").join("\n");
+  const s = outlineOf(code, "javascript");
+  assert.equal(s.length, OUTLINE_MAX_SYMBOLS);
+  assert.equal(s[0].name, "f0", "应保留文件里靠前的符号");
 });
 
 test("outline ignores symbols inside comments/strings", () => {
@@ -677,6 +730,16 @@ test("outline json: block comments and one-line nesting keep line numbers", () =
   const b = symNamed(s, "b");
   assert.equal(b.line, 4);
   assert.equal(b.container, "a");
+});
+
+test("outline json: escaped key names are decoded", () => {
+  // 符号列表是给人读、也用来搜索定位的：把 `"a\nb"` 原样列成带反斜杠的字面量，
+  // 用户拿它去文件里找是找不到的。`\n` 解成换行、`\u0064` 解成 d，
+  // 未知转义（`\x`）丢掉反斜杠保留其后字符 —— 展示优先于严格校验。
+  const src = '{\n  "a' + BS + 'nb": 1,\n  "c' + BS + 'u0064e": 2,\n  "x' + BS + 'y": 3\n}';
+  const s = outlineOf(src, "json");
+  assert.deepEqual(s.map((x) => x.name), ["a\nb", "cde", "xy"], JSON.stringify(s));
+  assert.deepEqual(s.map((x) => x.line), [2, 3, 4], "解码后行号串了行");
 });
 
 test("outline yaml: nested maps, lists, block scalars and urls", () => {
@@ -1045,6 +1108,14 @@ test("outline config: name length is bounded", () => {
   const long = "k".repeat(200);
   const s = outlineOf('{"' + long + '": 1}', "json");
   assert.equal(s.length, 0);
+  // XML 属性名走同一条上限：超长的「名字」几乎必然是解析跑偏（引号未闭合等），
+  // 曾经这一支完全绕过了长度判定，把 200 个字符当成一个属性列进大纲。
+  const xml = outlineOf('<a ' + long + '="1" ok="2"/>', "xml");
+  assert.deepEqual(
+    xml.filter((x) => x.kind === "attribute").map((x) => x.name),
+    ["ok"],
+    "XML 属性名未受 CFG_NAME_MAX 约束"
+  );
 });
 
 test("kindGroup classification", () => {
@@ -1083,6 +1154,36 @@ test("findMatches: basic, case, positions", () => {
   assert.equal(findMatches(text, "", {}).length, 0);
 });
 
+test("findMatches: offsets stay in original-text coordinates", () => {
+  // 不区分大小写时若先对全文做 toLowerCase()，个别字符会变长（`İ` U+0130 → `i` +
+  // 组合上的一点），小写串里的下标就不再等于原文下标：轻则高亮切到隔壁字符，
+  // 重则它之后的普通匹配全部错位、整片判成不存在。
+  const text = "İstanbul\nfoo bar FOO\n";
+  const m = findMatches(text, "foo", {});
+  assert.equal(m.length, 2, JSON.stringify(m));
+  for (const x of m) {
+    assert.equal(text.slice(x.start, x.end).toLowerCase(), "foo", "start/end 不是原文坐标");
+    assert.equal(text.split("\n")[x.line].slice(x.col, x.col + 3).toLowerCase(), "foo", "line/col 不对");
+  }
+  assert.deepEqual(m.map((x) => x.line), [1, 1]);
+  assert.equal(findMatches(text, "FOO", { caseSensitive: true }).length, 1);
+});
+
+test("findMatches: the query is a literal, not a pattern", () => {
+  // 界面把用户输入原样当查询串；按正则解释会让 `.`、`+`、`(` 这类常见输入
+  // 匹配到别的东西，甚至抛出语法错误。
+  assert.equal(findMatches("a.b", ".", {}).length, 1);
+  assert.equal(findMatches("axb", ".", {}).length, 0);
+  assert.equal(findMatches("x = a+b;", "+", {}).length, 1);
+  assert.equal(findMatches("f(a|b)", "(a|b)", {}).length, 1);
+  assert.equal(findMatches("a\\b", BS, {}).length, 1);
+});
+
+test("findMatches: stops at MAX_MATCHES", () => {
+  const text = "ab".repeat(MAX_MATCHES + 50);
+  assert.equal(findMatches(text, "ab", {}).length, MAX_MATCHES);
+});
+
 test("spansOfLine: match overlay", () => {
   const segs = [{ text: "const ", cls: "c-kw" }, { text: "x = ", cls: "" }, { text: "1", cls: "c-num" }];
   const spans = spansOfLine("const x = 1", segs, [{ col: 6, end: 7 }], 0);
@@ -1090,6 +1191,23 @@ test("spansOfLine: match overlay", () => {
   assert.ok(match !== undefined);
   assert.equal(match.text, "x");
   assert.equal(match.current, true);
+});
+
+test("spansOfLine: boundaries and degenerate input", () => {
+  const segs = [{ text: "ab", cls: "c-ident" }, { text: "cd", cls: "" }];
+  // 匹配横跨 token 边界 → 按边界切开，每段保留自己原本的 token 类别
+  assert.deepEqual(
+    spansOfLine("abcd", segs, [{ col: 1, end: 3 }], 0).map((s) => [s.text, s.cls, s.match === true, s.current === true]),
+    [["a", "c-ident", false, false], ["b", "c-ident", true, true], ["c", "", true, true], ["d", "", false, false]]
+  );
+  // 同一行多处匹配：只有 currentIndex 指的那处标 current
+  const two = spansOfLine("aXbXc", [{ text: "aXbXc", cls: "" }], [{ col: 1, end: 2 }, { col: 3, end: 4 }], 1);
+  assert.deepEqual(two.filter((s) => s.match).map((s) => s.text), ["X", "X"]);
+  assert.equal(two.filter((s) => s.current).length, 1);
+  // 纯文本兜底视图（无 token）也要能出高亮
+  assert.deepEqual(spansOfLine("abc", [], [{ col: 0, end: 3 }], 0), [{ text: "abc", cls: "", match: true, current: true }]);
+  // 越界的匹配区间不该抛错，也不该产出空 span
+  assert.deepEqual(spansOfLine("ab", [{ text: "ab", cls: "" }], [{ col: 2, end: 3 }], -1), [{ text: "ab", cls: "" }]);
 });
 
 // ---------- selection → draft ----------
@@ -1105,6 +1223,21 @@ test("selectionHeader: cwd-relative path with line spans", () => {
   assert.equal(selectionHeader("/repo/a.ts", undefined, { start: 1, end: 2 }), "/repo/a.ts:1-2");
   // 大小写不敏感的前缀匹配（Windows 盘符）
   assert.equal(selectionHeader("c:\\repo\\app\\x.ts", "C:\\repo\\App", undefined), "x.ts");
+});
+
+test("selectionHeader: relativeTo edge cases", () => {
+  // 前缀必须落在**路径分隔符**上：只比 `cwd + "/"` 之外的写法会把兄弟目录
+  // 误伤成子目录（`/repo/app` 与 `/repo/application` 只差一个字符）。
+  assert.equal(selectionHeader("/repo/application/x.ts", "/repo/app", undefined), "/repo/application/x.ts");
+  assert.equal(selectionHeader("/repo/app2/x.ts", "/repo/app", undefined), "/repo/app2/x.ts");
+  // cwd 末尾的斜杠可有可无；两种分隔符混写也认（Windows 路径进 fsRead 后可能是反斜杠）
+  assert.equal(selectionHeader("/repo/app/x.ts", "/repo/app/", undefined), "x.ts");
+  assert.equal(selectionHeader("C:\\repo\\app\\x.ts", "C:/repo/app", undefined), "x.ts");
+  // 正好选中 cwd 本身
+  assert.equal(selectionHeader("/repo/app", "/repo/app", { start: 3, end: 3 }), ".:3");
+  // cwd 缺失 / 空串：原样输出绝对路径，不抛错
+  assert.equal(selectionHeader("/repo/a.ts", "", { start: 1, end: 1 }), "/repo/a.ts:1");
+  assert.equal(selectionHeader("/repo/a.ts", null, { start: 1, end: 1 }), "/repo/a.ts:1");
 });
 
 test("buildSelectionInsert: fenced block within the limit", () => {
@@ -1210,6 +1343,17 @@ test("ini: bare-key highlight and outline agree", () => {
   const segs = tokenizeLines("[s]", "ini")[0].segs;
   assert.equal(segs.filter((s) => s.cls === "c-section").map((s) => s.text).join(""), "s");
   assert.equal(segs.filter((s) => s.cls === "c-key").length, 0);
+});
+
+test("yaml: flow-mapping braces are not part of the key", () => {
+  // `x: {a: 1}` 这类行内映射：键从 `{` / `[` 之后才开始。少了这一步定界符处理，
+  // `{port` 会被整段涂成键，与大纲列出的 `port` 对不上。
+  const keyOf = (line) => tokenizeLines(line, "yaml")[0].segs.filter((s) => s.cls === "c-key").map((s) => s.text).join("");
+  assert.equal(keyOf("{port: 8080}"), "port");
+  assert.equal(keyOf("  {port: 8080}"), "port");
+  assert.equal(keyOf("- {a: 1}"), "a");
+  // 普通 `key: value` 不受影响
+  assert.equal(keyOf("key: v"), "key");
 });
 
 test("toml: bare identifiers are not keys (no false highlighting)", () => {
@@ -1434,6 +1578,148 @@ test("built client bundle keys its <style> tag by the full package name", () => 
   assert.ok(!bundle.includes("__CN_PACKAGE_NAME__"), "bundle 残留未替换的包名令牌");
 });
 
+// ---------- 构建：产物新鲜度与共享作用域的四道校验 ----------
+test("build: the committed bundle equals a fresh build", () => {
+  // lib/client.js 是产物。之前只断言「里面含某段文本」，源码改了忘了构建时
+  // 那些断言照样绿 —— 直接逐字比对才能钉住「产物 == 源码」。
+  const { code } = buildBundle();
+  const committed = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  assert.equal(committed, code, "lib/client.js 已与源码不同步：跑 npm run build（node scripts/build.mjs）");
+});
+
+test("build: the real modules pass every scope guard", () => {
+  const sources = MODULES.map((name) => ({
+    module: name,
+    source: readFileSync(new URL("../src/" + name + ".js", import.meta.url), "utf8")
+  }));
+  // 拼进同一个函数作用域：顶层重名 = 后者静默覆盖前者，单测全绿而 bundle 行为不对
+  assert.deepEqual(findCollisions(sources), [], "src 模块间存在顶层重名");
+  // 剥离只认单行写法；残留的 import/export 内联后就是语法错误
+  for (const { module, source } of sources) {
+    assert.deepEqual(stripModule(source).leftovers, [], "src/" + module + " 有剥不掉的模块语法");
+  }
+  const declared = new Set();
+  for (const { source } of sources) for (const n of topLevelNames(source)) declared.add(n);
+  for (const name of EXPORTS) assert.ok(declared.has(name), "EXPORTS 列了 src 里没有的 " + name);
+  // 模板用到的每个 __cn.X 都在导出面里
+  const template = readFileSync(new URL("../scripts/client.template.js", import.meta.url), "utf8");
+  for (const name of cnUsage(template)) {
+    assert.ok(EXPORTS.includes(name), "模板用了未导出的 " + name);
+  }
+});
+
+test("build: each scope guard actually fires", () => {
+  // 校验本身失效（永远不报）比没有校验更糟：那会让人以为重名/漏导出是安全的。
+  assert.deepEqual(
+    findCollisions([
+      { module: "a", source: "export function helper() {}\n" },
+      { module: "b", source: "const helper = 1;\n" }
+    ]).map((c) => c.name + ":" + c.first + ">" + c.again),
+    ["helper:a>b"]
+  );
+  // 缩进的声明不是顶层声明，不该误报
+  assert.deepEqual(findCollisions([
+    { module: "a", source: "function outer() {\n  const inner = 1;\n}\n" },
+    { module: "b", source: "function other() {\n  const inner = 2;\n}\n" }
+  ]), []);
+  // 多行 import 剥不掉 → 必须报残留
+  assert.ok(stripModule('import {\n  a\n} from "x.js";\nexport const k = 1;\n').leftovers.length > 0);
+  assert.deepEqual(stripModule('import { a } from "x.js";\nexport const k = 1;\n').leftovers, []);
+
+  // 用一份最小 fixture 驱动 buildBundle 的四类失败
+  const root = mkdtempSync(join(tmpdir(), "cn-build-"));
+  mkdirSync(join(root, "src"), { recursive: true });
+  mkdirSync(join(root, "scripts"), { recursive: true });
+  writeFileSync(join(root, "package.json"), JSON.stringify({ name: "@t/pkg" }), "utf8");
+  writeFileSync(join(root, "scripts", "client.template.js"), '// __CN_PURE__\nconst p = "__CN_PACKAGE_NAME__";\nvoid __cn.alpha; void __cn.beta;\n', "utf8");
+  const src = (name, body) => writeFileSync(join(root, "src", name + ".js"), body, "utf8");
+  src("m", "export const alpha = 1;\nexport function beta() { return alpha; }\n");
+  const throwsWith = (opts, needle) => {
+    let message = "";
+    try { buildBundle(opts); } catch (e) { message = String(e && e.message); }
+    assert.ok(message.includes(needle), "应当失败并提到 " + needle + "，实际：" + (message || "（没抛错）"));
+  };
+  throwsWith({ root, modules: ["m"], exportsList: ["alpha", "ghost"] }, "ghost");
+  throwsWith({ root, modules: ["m"], exportsList: ["alpha"] }, "beta");
+  src("dup", "export const alpha = 2;\n");
+  throwsWith({ root, modules: ["m", "dup"], exportsList: ["alpha"] }, "重名");
+  src("bad", 'import {\n  q\n} from "./m.js";\nexport const solo = 1;\n');
+  throwsWith({ root, modules: ["bad"], exportsList: ["solo"] }, "未剥离");
+
+  // 回归：源码里的 `$&` 必须原样进产物。字符串形式的 replace 会把替换文本里的
+  // `$&` / `` $` `` / `$'` 当成特殊模式展开 —— escapeRegExp 这类正则转义写法会被
+  // 静默改写成标记本身，产物照样通过语法检查，只在运行时给出错误的转义结果。
+  const dlr = 'return s.replace(/[.*+?^${}()|[\\]\\\\]/g, "\\\\$&");';
+  src("dlr", "export function esc(s) {\n  " + dlr + "\n}\nexport const alpha = esc(\"x\");\nexport const beta = 1;\n");
+  const kept = buildBundle({ root, modules: ["dlr"], exportsList: ["alpha", "beta", "esc"] });
+  assert.ok(kept.code.includes(dlr), "产物改写了源码里的 $&（内联替换必须用函数形式）");
+
+  // 「产物逐行含有源码」这道校验本身要能报：内容被替换掉时必须失败，而不是静默放行。
+  src("token", 'export const alpha = "__CN_PACKAGE_NAME__";\nexport const beta = 1;\n');
+  throwsWith({ root, modules: ["token"], exportsList: ["alpha", "beta"] }, "改写");
+
+  // 正常路径：产物带包名、令牌已替换
+  const built = buildBundle({ root, modules: ["m"], exportsList: ["alpha", "beta"] });
+  assert.ok(built.code.includes('"@t/pkg"') && !built.code.includes("__CN_PACKAGE_NAME__"));
+});
+
+test("built client bundle ships the lifecycle and a11y fixes", () => {
+  const bundle = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  // 静默上限必须在界面上说出来，否则用户以为「就这么多」
+  assert.ok(bundle.includes("__cn.MAX_MATCHES"), "匹配数封顶未提示");
+  assert.ok(bundle.includes("__cn.OUTLINE_MAX_SYMBOLS"), "符号数封顶未提示");
+  assert.ok(bundle.includes("symbols.capped") && bundle.includes("search.aria"), "缺少新增文案键");
+  // 行节点要 memo：否则开关符号列表都会重建整篇代码
+  assert.ok(bundle.includes("const rows = react.useMemo("), "行节点未 memo 化");
+  // 卸载要清闪烁定时器
+  assert.ok(bundle.includes("react.useEffect(() => () => {"), "卸载未清理定时器");
+  // 键盘可达：符号行是 div，必须显式给 role/tabIndex
+  assert.ok(bundle.includes('role: "button"') && bundle.includes("tabIndex: 0"), "符号行不可键盘操作");
+  assert.ok(bundle.includes('"aria-expanded"') && bundle.includes('"aria-pressed"'), "按钮缺少状态语义");
+  // 大文件查找输入要跟手：查询值延后一帧（宿主 React 太旧时降级直通）
+  assert.ok(bundle.includes("useDeferredValue"), "查找未做延后计算");
+  // rangeCount 为 0 时 getRangeAt(0) 会抛 IndexSizeError
+  assert.ok(bundle.includes("sel.rangeCount === 0"), "选区未判空");
+});
+
+test("READMEs stay in sync with package.json and the documented workflow", () => {
+  // README 里的版本号曾经过期（包已 0.2.2、文档还写 0.2.1），升级示例也跟着失真。
+  const pkg = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+  const zh = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+  const en = readFileSync(new URL("../README_EN.md", import.meta.url), "utf8");
+  assert.ok(zh.includes("当前版本 **" + pkg.version + "**"), "README.md 的版本号已过期（" + pkg.version + "）");
+  assert.ok(en.includes("current version **" + pkg.version + "**"), "README_EN.md 的版本号已过期（" + pkg.version + "）");
+  assert.ok(zh.includes("@whybebabo/dsh-code-nav@" + pkg.version), "README.md 的精确版本升级示例已过期");
+  assert.ok(en.includes("@whybebabo/dsh-code-nav@" + pkg.version), "README_EN.md 的精确版本升级示例已过期");
+  // 改完 src 忘了重新构建是这个仓库最常见的错，文档必须给出口
+  for (const [label, doc] of [["README.md", zh], ["README_EN.md", en]]) {
+    assert.ok(doc.includes("npm run build") && doc.includes("npm test"), label + " 未写 npm run build / npm test");
+  }
+  for (const name of ["build", "check", "test", "prepack", "release"]) {
+    assert.ok(pkg.scripts && pkg.scripts[name], "package.json 缺少 scripts." + name);
+  }
+  // prepack 是 npm 发布前的钩子：不在这儿构建，就可能把旧产物打进 tarball
+  assert.ok(pkg.scripts.prepack.includes("scripts/build.mjs"), "scripts.prepack 未触发构建");
+  assert.ok(pkg.scripts.test.includes("node --check lib/client.js"), "scripts.test 未做产物语法校验");
+});
+
+test("CI workflow builds, checks, tests and refuses a stale bundle", () => {
+  // CI 是这个仓库唯一的「产物没过期」强制点；步骤丢了就等于门禁没了。
+  const ci = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
+  for (const step of [
+    "node scripts/build.mjs",
+    "node --check lib/client.js",
+    "node test/code-nav.test.mjs",
+    "git diff --exit-code -- lib/client.js",
+    "npm pack",
+    "node scripts/release-code-nav.mjs --dry-run"
+  ]) {
+    assert.ok(ci.includes(step), "CI 缺少步骤：" + step);
+  }
+  // 事件上下文绝不插进 shell（`${{ }}` 注入是 workflow 里的经典 RCE）
+  assert.ok(!/\$\{\{\s*(github\.event|env)\b[^}]*\}\}/.test(ci.split("jobs:")[1] || ""), "CI 把事件上下文放进 shell");
+});
+
 test("README states the real test count", () => {
   // README 里的「N 例 / N cases」曾经过期（写 61、实际更多）。
   // 直接数本文件的顶层 test() 数量（与 node:test 的计数一致），再和 README 对齐，
@@ -1466,8 +1752,9 @@ test("properties-key: escape-aware key scanning", () => {
   // k \ \ : v → 下标 0:k 1:\ 2:\ 3:: 4:v，转义吃掉下标 2，故分隔符在下标 3
   assert.equal(propertiesKeyEnd("k" + BS + BS + ":v"), 3);
   assert.deepEqual(symList(outlineOf("k" + BS + BS + ":v\n", "properties")), ["key:k" + BS]);
-  assert.equal(isPropertiesBareKeyLine("key" + BS + ":part"), true);
-  assert.equal(isPropertiesBareKeyLine("a=1"), false);
+  // 裸键（整行都是键名）就是「没有分隔符」那一支：propertiesKeyEnd 返回 -1
+  assert.equal(propertiesKeyEnd("key" + BS + ":part"), -1, "转义分隔符的裸键整行是键名");
+  assert.equal(propertiesKeyEnd("a=1") >= 0, true, "有分隔符的行不是裸键行");
   // 与反斜杠奇偶规则一致：行尾孤立反斜杠属于续行标记，不是键名一部分
   assert.equal(propertiesKeyEnd("a" + BS), 1);
 });
@@ -1706,9 +1993,12 @@ test("decideAssetAction: skip identical assets, never blind-POST a duplicate", a
   assert.equal(mod.decideAssetAction({ name: "x", digest: "SHA256:" + "A".repeat(64) }, local).action, "skip");
   // digest 不同 → 替换（同名重复上传只会 422，替换才能收敛）
   assert.equal(mod.decideAssetAction({ name: "x", digest: "sha256:" + "b".repeat(64) }, local).action, "replace");
-  // 只有 size：一致跳过，不一致替换
-  assert.equal(mod.decideAssetAction({ name: "x", size: 100 }, local).action, "skip");
+  // 只有 size：**不能**因为大小相等就跳过。GitHub 资产的 digest 经常是 null，
+  // 而「同大小不同内容」完全可能 —— skip 会把错产物永久留在已发布版本上。
+  assert.equal(mod.decideAssetAction({ name: "x", size: 100 }, local).action, "replace");
   assert.equal(mod.decideAssetAction({ name: "x", size: 101 }, local).action, "replace");
+  // 只有本地 size、远端没给 → 同样替换
+  assert.equal(mod.decideAssetAction({ name: "x", size: 100 }, { size: 100 }).action, "replace");
   // 什么都没给 → 不能盲传（只能替换）
   assert.equal(mod.decideAssetAction({ name: "x" }, local).action, "replace");
   assert.equal(mod.decideAssetAction({ name: "x" }, {}).action, "replace");
@@ -1723,4 +2013,48 @@ test("release script: re-running a published release does not fail on the asset"
   assert.ok(src.includes("ASSET DECISION"), "缺少资产决策日志");
   assert.ok(src.includes('"skip"'), "缺少跳过分支");
   assert.ok(src.includes('method: "DELETE"'), "替换时未删除旧资产（会 422 already_exists）");
+});
+
+// ---------- 发布脚本：凭据获取与远端写入的门禁 ----------
+test("release scripts: one credential helper, and the token never reaches the log", async () => {
+  const mod = await import("../scripts/release-config.mjs");
+  assert.equal(typeof mod.readGithubToken, "function", "共享的取 token helper 缺失");
+  const scripts = ["release-code-nav.mjs", "pr-better-sidebar.mjs", "repo-topics.mjs"];
+  for (const name of scripts) {
+    const src = readFileSync(new URL("../scripts/" + name, import.meta.url), "utf8");
+    assert.ok(src.includes("readGithubToken()"), name + " 没有走共享 helper");
+    // 三个脚本原先各抄一遍 credential fill，失败分支各自 `console.error(e.message)`：
+    // git 的报错里可能带凭据助手的路径与提示。现在任何脚本都不许直接问 git、
+    // 也不许把 credential 的输出/异常原文打出来。（注释里提到 git credential 是允许的，
+    // 所以查的是「作为参数传给 execFileSync 的引号字符串」。）
+    assert.ok(!src.includes('"credential"'), name + " 仍在脚本里直接调 git credential");
+    assert.ok(!/console\.(log|error)\([^)]*\bout\b/.test(src), name + " 可能打印 credential fill 的输出");
+  }
+  const helper = readFileSync(new URL("../scripts/release-config.mjs", import.meta.url), "utf8");
+  assert.ok(/throw new Error\(/.test(helper), "取不到 token 时必须抛错而不是回落到匿名请求");
+  assert.ok(!helper.includes("console.log(out"), "helper 不得打印 credential 输出");
+});
+
+test("release script: creating a public repository requires an explicit --yes", () => {
+  const src = readFileSync(new URL("../scripts/release-code-nav.mjs", import.meta.url), "utf8");
+  assert.ok(src.includes('argv.includes("--yes")'), "没有 --yes 开关");
+  // 404 也可能是「仓库存在但当前 token 看不见」，此时新建同名公开仓库会把内容暴露出去
+  const gate = src.indexOf("/user/repos");
+  const guard = src.lastIndexOf("if (!YES)", gate);
+  assert.ok(gate > 0 && guard >= 0 && guard < gate, "建仓前没有 --yes 门禁");
+  assert.ok(src.includes("本次未推送分支、未打 tag、未创建 Release"), "门禁分支要说明本次没写任何东西");
+  // --dry-run 必须在取凭据之前退出
+  assert.ok(src.indexOf("if (DRY)") < src.indexOf("readGithubToken()"), "dry run 仍应先取凭据（不对）");
+});
+
+test("pr script: dry run stops before any clone, commit or push", () => {
+  const src = readFileSync(new URL("../scripts/pr-better-sidebar.mjs", import.meta.url), "utf8");
+  assert.ok(src.includes('includes("--dry-run")'), "PR 脚本没有 --dry-run");
+  const dryExit = src.indexOf("if (DRY)");
+  assert.ok(dryExit > 0, "缺少 dry-run 分支");
+  // 退出点必须早于取凭据、clone、push 与建 PR
+  for (const needle of ["readGithubToken()", 'sh("git", ["clone"', 'sh("git", ["-C", CLONE, "push"', "/pulls"]) {
+    const at = src.indexOf(needle);
+    assert.ok(at > dryExit, needle + " 发生在 dry-run 退出之前");
+  }
 });

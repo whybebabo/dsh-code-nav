@@ -35,11 +35,6 @@ export function propertiesKeyEnd(body) {
   return -1;
 }
 
-/** properties 是否把该行视为「无分隔符的裸键行」（整行都是键名）。 */
-export function isPropertiesBareKeyLine(body) {
-  return propertiesKeyEnd(body) === -1;
-}
-
 /**
  * 取出 properties 行的**键文本**（未反转义），没有键时返回 ""。
  *

@@ -29,6 +29,33 @@ function unquoteKey(name) {
   return name;
 }
 
+/**
+ * 解码 JSON 键名里的字符串转义（`"a\\nb"` 的键显示为 `a`↵`b` 而不是字面 `a\nb`）。
+ * 未识别的转义按字面保留 —— 与 properties 侧的 unescapePropertyKey 同一宽容口径，
+ * 也保证「展示优先于严格校验」：故意写坏的键名照样能列出来。
+ * @param {string} raw 已去掉外层引号的键名
+ * @returns {string}
+ */
+function unescapeJsonKey(raw) {
+  if (raw.indexOf("\\") === -1) return raw;
+  const ESCAPES = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
+  let out = "";
+  for (let i = 0; i < raw.length; i++) {
+    const ch = raw[i];
+    if (ch !== "\\") { out += ch; continue; }
+    const next = raw[i + 1];
+    if (next === undefined) { out += ch; continue; }
+    if (next === "u") {
+      const hex = raw.slice(i + 2, i + 6);
+      if (/^[0-9a-fA-F]{4}$/.test(hex)) { out += String.fromCharCode(parseInt(hex, 16)); i += 5; continue; }
+      out += next; i += 1; continue;
+    }
+    out += ESCAPES[next] !== undefined ? ESCAPES[next] : next;
+    i += 1;
+  }
+  return out;
+}
+
 /** 行首缩进列数（空格与 Tab 均按 1 计）。 */
 function indentOf(raw) {
   let i = 0;
@@ -209,7 +236,7 @@ function extractJson(text) {
         i++;
       }
       const raw = text.slice(start + 1, Math.min(i, n));
-      keyText = raw.endsWith(quote) ? raw.slice(0, -1) : raw;
+      keyText = unescapeJsonKey(raw.endsWith(quote) ? raw.slice(0, -1) : raw);
     } else if (ch === "_" || ch === "$" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")) {
       // json5 裸键 / true / false / null 等字面量
       const start = i;
@@ -540,7 +567,11 @@ function extractXml(tokens, lineCount) {
     }
     if (isXmlNameChar(ch)) { buf += ch; ci++; continue; }
     if (buf.length > 0) {
-      out.push({ kind: "attribute", name: buf, line: li + 1, container: element });
+      // 属性名与元素名同一口径：超长的「名字」几乎必然是解析跑偏（少见的引号未闭合等），
+      // 代码大纲对 >CFG_NAME_MAX 的名字是直接丢弃，这里也丢弃而不是截断入列。
+      if (buf.length <= CFG_NAME_MAX) {
+        out.push({ kind: "attribute", name: buf, line: li + 1, container: element });
+      }
       buf = "";
       continue;
     }

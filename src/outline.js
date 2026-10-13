@@ -244,15 +244,32 @@ function extractSql(tokens, lineCount) {
   return out;
 }
 
-/** Vue/Svelte：抽取 <script> 块交给 JS/TS 规则，行号回加偏移。 */
-function extractScriptBlock(text, lang) {
-  const m = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/i.exec(text);
-  if (m === null) return { code: null, offset: 0 };
-  const attrs = m[1] || "";
-  const isTs = /lang=["']ts["']|lang=["']typescript["']/.test(attrs);
-  const before = text.slice(0, m.index);
-  const offset = before.split(/\r?\n/).length; // <script 起始行的上一行数
-  return { code: m[2], offset, subLang: isTs ? "typescript" : "javascript" };
+/** Vue/Svelte：抽取 `<script>` 块交给 JS/TS 规则，行号按各块的起始偏移回加。 */
+function extractScriptBlocks(text) {
+  const blocks = [];
+  // 全局匹配：一个 SFC 里同时写 `<script>` 与 `<script setup>` 是常规用法，
+  // 只取第一个块会让一半符号凭空消失。
+  const re = /<script\b([^>]*)>([\s\S]*?)<\/script\s*>/gi;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const attrs = m[1] || "";
+    const isTs = /lang\s*=\s*["'](?:ts|typescript)["']/.test(attrs);
+    // 内容从开标签的 `>` 之后开始（attrs 不含 `>`，故 m[0] 里第一个 `>` 就是它）。
+    // 偏移取「内容起点之前的换行数」，于是「块内 1 基行号 + 偏移」恰好等于文件行号，
+    // 且 `<template><script>...` 这种开标签不在行首的情况也成立。
+    const contentStart = m.index + m[0].indexOf(">") + 1;
+    const offset = (text.slice(0, contentStart).match(/\n/g) || []).length;
+    blocks.push({ code: m[2], offset, subLang: isTs ? "typescript" : "javascript" });
+  }
+  return blocks;
+}
+
+/** 符号数量上限（挡住巨型文件的大纲开销，也用于界面提示「仅前 N 个」）。 */
+export const OUTLINE_MAX_SYMBOLS = 500;
+
+/** 裁到符号上限；调用方据此判断列表是否被截断。 */
+function capSymbols(symbols) {
+  return symbols.length > OUTLINE_MAX_SYMBOLS ? symbols.slice(0, OUTLINE_MAX_SYMBOLS) : symbols;
 }
 
 /** 主入口：文本 + 语言 id → 符号列表（失败返回 []）。 */
@@ -260,9 +277,19 @@ export function outlineOf(text, lang) {
   if (typeof text !== "string" || text.length === 0) return [];
   try {
     if (lang === "vue" || lang === "svelte") {
-      const { code, offset, subLang } = extractScriptBlock(text, lang);
-      if (code === null) return [];
-      return outlineOf(code, subLang).map((s) => ({ ...s, line: s.line + offset }));
+      const blocks = extractScriptBlocks(text);
+      if (blocks.length === 0) return [];
+      if (blocks.length === 1) {
+        const { code, offset, subLang } = blocks[0];
+        return outlineOf(code, subLang).map((s) => ({ ...s, line: s.line + offset }));
+      }
+      // 多块：各块内部已按语言规则解析，合并后按行号排回文档顺序
+      const merged = [];
+      for (const b of blocks) {
+        for (const s of outlineOf(b.code, b.subLang)) merged.push({ ...s, line: s.line + b.offset });
+      }
+      merged.sort((a, b) => a.line - b.line);
+      return capSymbols(merged);
     }
     const tokens = tokenizeLines(text, lang);
     if (tokens === null) return [];
@@ -371,7 +398,7 @@ export function outlineOf(text, lang) {
       }
       final.push(s);
     }
-    return final.length > 500 ? final.slice(0, 500) : final;
+    return capSymbols(final);
   } catch {
     return [];
   }

@@ -11,6 +11,7 @@
  * - 产物名：`npm pack` 的实际文件名规则 `<name>-<version>.tgz`（scoped 包去掉 `@scope/`）
  */
 import { readFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -26,6 +27,36 @@ export const DOC_LINK_REPOS = ["omdsh-dev/DSH-better-sidebar"];
 /** 读取 package.json。 */
 export function readPkg(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+}
+
+/**
+ * 经 `git credential fill` 取 GitHub token（沙箱阻断了 GCM 的凭据管道，所以要在
+ * 进程内直接问 git，而不是依赖环境变量）。
+ *
+ * 三个脚本原先各自抄了一遍这段代码，其中「拿不到 token」的分支写法不一致：
+ * 有的只 `console.error(e.message)`（可能把带 token 的 git 报错原样打进日志），
+ * 有的静默 `process.exit(1)`。统一到这里，并且**只抛错、不打印**：调用方要报告
+ * 失败也只允许报告这句话本身，绝不回显 credential 输出。
+ *
+ * @returns {string} token
+ * @throws 取不到 token 时抛错（调用方据此停下，不要回落到匿名请求）
+ */
+export function readGithubToken() {
+  let out = "";
+  try {
+    out = execFileSync("git", ["credential", "fill"], {
+      input: "protocol=https\nhost=github.com\n\n",
+      encoding: "utf8",
+    });
+  } catch {
+    // 不回显 execFileSync 的错误对象：git 的报错里可能带上凭据助手的路径与提示。
+    throw new Error("无法从 git 凭据助手取到 GitHub token（git credential fill 失败）");
+  }
+  const m = /^password=(.+)$/m.exec(out);
+  if (m === null) throw new Error("git 凭据助手没有返回 GitHub token");
+  const token = m[1].trim();
+  if (token.length === 0) throw new Error("git 凭据助手返回了空的 GitHub token");
+  return token;
 }
 
 /**
@@ -105,19 +136,6 @@ export function tgzPathOf(pkg = readPkg(), root = ROOT) {
   return join(root, tgzNameOf(pkg));
 }
 
-/**
- * 校验脚本里**没有**残留写死的其它仓库引用，避免误操作别人的仓库。
- *
- * 覆盖三种写法（原始缺陷正是 `const REPO = "AnakinCao/dsh-code-nav"` 这种裸字符串）：
- * 1. 裸的引号包字符串 `"owner/repo"`；
- * 2. GitHub URL：`https://github.com/owner/repo[.git]`、`git+https://…`、`git@github.com:…`；
- * 3. REST / 上传 API 路径：`/repos/owner/repo`、`api.github.com/repos/…`。
- *
- * @param {string} source 脚本源码
- * @param {string} expectedRepo 期望的当前仓库（owner/repo）
- * @param {string[]} [allowed] 允许出现的其它仓库（例如确实要操作的上游仓库）
- * @returns {string[]} 可疑的写死仓库引用（空数组 = 没问题）
- */
 /** MIME 顶级类型：`application/gzip` 这类字符串形状与 `owner/repo` 相同，需排除。 */
 const MIME_TOP_LEVEL = new Set([
   "application", "text", "image", "audio", "video", "multipart",
@@ -185,10 +203,12 @@ export function hardcodedRepoWarnings(source, expectedRepo, allowed = []) {
  * 同名资产已存在时 GitHub 返回 422 `already_exists`，于是「成功发布后再跑一次」
  * 必然在最后一步失败。
  *
- * 判定顺序（先强后弱，宁可替换也不重复上传）：
+ * 判定顺序（先强后弱，宁可替换也不留错产物）：
  * 1. 远端无同名资产 → 上传；
  * 2. 远端给了 `digest`（`sha256:…`）→ 与本地 sha256 比较：相同跳过，不同替换；
- * 3. 只有 `size` → 比较大小：相同跳过，不同替换；
+ * 3. 只有 `size` → **替换**：大小相等证明不了内容相同，而 GitHub 的资产 `digest`
+ *    经常是 null（尤其是经 UI / 旧接口上传的），拿大小当「已经一样」会把错产物
+ *    永久留在已发布版本上 —— 重传一次是幂等的，留错文件不是。
  * 4. 完全无法比较 → 替换（重复上传只会 422，替换是唯一能收敛的选择）。
  *
  * @param {{name?:string, size?:number, digest?:string}|null|undefined} existing 远端同名资产
@@ -209,8 +229,10 @@ export function decideAssetAction(existing, local) {
       : { action: "replace", reason: "同名资产 sha256 不一致" };
   }
   if (typeof existing.size === "number" && local && typeof local.size === "number") {
+    // 大小相等**不能**证明内容相同，且远端 digest 常常缺失；替换才能收敛，
+    // skip 会把可能不同的产物永久挂在已发布版本上。
     return existing.size === local.size
-      ? { action: "skip", reason: "同名资产大小一致（远端未提供 digest）" }
+      ? { action: "replace", reason: "远端未提供 digest，大小一致不足以判定内容相同（替换）" }
       : { action: "replace", reason: "同名资产大小不一致（远端未提供 digest）" };
   }
   return { action: "replace", reason: "无法比较同名资产（缺少 digest / size）" };

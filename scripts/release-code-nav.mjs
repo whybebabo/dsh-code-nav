@@ -6,21 +6,28 @@
 //
 // 用法：
 //   node scripts/release-code-nav.mjs --dry-run     # 只打印计划，不写 git、不发网络请求
-//   node scripts/release-code-nav.mjs               # 真正发布
+//   node scripts/release-code-nav.mjs --yes         # 真正发布
 //   可选：--remote <name>  指定推送用 remote（默认自动匹配派生仓库）
 //         --allow-dirty   允许工作区有未提交改动
+//   仅当 GitHub 报告目标仓库不存在（404）、需要脚本**新建公开仓库**时，
+//   必须带 --yes —— 仓库可能只是当前 token 看不见，此时新建会泄露内容。
 //
-// 凭据经 `git credential fill` 进程内获取（沙箱阻断 GCM 凭据管道，须 danger-full-access 运行）。
+// 凭据经 git credential fill 进程内获取（见 release-config.mjs 的 readGithubToken；
+// 沙箱阻断 GCM 凭据管道，须 danger-full-access 运行）。取到的 token 只在内存里用，
+// 不写盘、不进日志。
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readPkg, repoOf, tagOf, tgzNameOf, tgzPathOf, isSameRepo, decideTagAction, parseRemoteTagCommit, decideAssetAction, ROOT } from "./release-config.mjs";
+import { readPkg, repoOf, tagOf, tgzNameOf, tgzPathOf, isSameRepo, decideTagAction, parseRemoteTagCommit, decideAssetAction, readGithubToken, ROOT } from "./release-config.mjs";
 
 const argv = process.argv.slice(2);
 const DRY = argv.includes("--dry-run");
 const ALLOW_DIRTY = argv.includes("--allow-dirty");
+// 建仓 / 推分支 / 发 Release 都是**别人能看见**的远端写入。默认只走 --dry-run，
+// 真发布必须显式带 --yes（曾出现过「顺手跑一下脚本」就在账号下建出同名公开仓库）。
+const YES = argv.includes("--yes");
 const remoteFlagIdx = argv.indexOf("--remote");
 const REMOTE_FLAG = remoteFlagIdx >= 0 ? argv[remoteFlagIdx + 1] : null;
 
@@ -103,20 +110,15 @@ if (!ALLOW_DIRTY && gitOut(["status", "--porcelain"]) !== "") {
   process.exit(1);
 }
 
-// 1) token
+// 1) token —— 取不到就停下。失败信息只说「取不到」，绝不回显 credential 的输出
+//（那里头可能带着凭据助手路径与提示）。
 let token;
 try {
-  const out = execFileSync("git", ["credential", "fill"], {
-    input: "protocol=https\nhost=github.com\n\n",
-    encoding: "utf8",
-  });
-  const m = out.match(/^password=(.+)$/m);
-  if (m) token = m[1].trim();
+  token = readGithubToken();
 } catch (e) {
-  console.error("cred fill failed:", e.message.split("\n")[0]);
+  console.error("[release] " + e.message);
   process.exit(1);
 }
-if (!token) { console.error("no token"); process.exit(1); }
 
 const GH = (path, init = {}) =>
   fetch("https://api.github.com" + path, {
@@ -133,6 +135,17 @@ const GH = (path, init = {}) =>
 // 2) 确保仓库存在
 const exist = await GH("/repos/" + REPO);
 if (exist.status === 404) {
+  // 404 有两种完全不同的含义：仓库真不存在，或者**存在但当前 token 看不见**
+  // （私有仓库 + 范围受限的 fine-grained token）。后一种情况下直接建仓要么 422，
+  // 要么在账号下多出一个同名公开仓库 —— 把内容暴露出去。所以这一步要人确认。
+  if (!YES) {
+    console.error("[release] GitHub 报告 " + REPO + " 不存在（404），脚本准备**新建公开仓库**。");
+    console.error("[release] 但如果它其实存在、只是当前 token 无权限看到，新建就会");
+    console.error("[release] 要么失败、要么在账号下多出一个同名**公开**仓库。");
+    console.error("[release] 确认无误后再跑一次并加 --yes：node scripts/release-code-nav.mjs --yes");
+    console.error("[release] 本次未推送分支、未打 tag、未创建 Release。");
+    process.exit(1);
+  }
   const created = await GH("/user/repos", {
     method: "POST",
     body: JSON.stringify({
@@ -215,12 +228,6 @@ const testCount = (() => {
   try {
     const t = readFileSync(join(ROOT, "test", "code-nav.test.mjs"), "utf8");
     return (t.match(/^test\(/gm) || []).length;
-  } catch { return null; }
-})();
-const langCount = (() => {
-  try {
-    const reg = readFileSync(join(ROOT, "src", "lang-registry.js"), "utf8");
-    return new Set([...reg.matchAll(/\bexts:\s*\[([^\]]*)\]/g)].map((m) => m[1])).size || null;
   } catch { return null; }
 })();
 const body = [

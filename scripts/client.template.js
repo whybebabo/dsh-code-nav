@@ -50,6 +50,8 @@ window.__ModuleLoader__.load({
 			".cn-mini{border:none;background:transparent;color:var(--cn-dim);cursor:pointer;border-radius:5px;font-size:12px;line-height:18px;padding:0 4px}",
 			".cn-mini:hover{color:var(--cn-accent)}",
 			".cn-mini.on{color:var(--cn-accent)}",
+			// 宿主的全局样式常把 outline:none 套在 button 上，键盘用户就没了落点
+			".cn-chip:focus-visible,.cn-symbtn:focus-visible,.cn-mini:focus-visible,.cn-symclose:focus-visible,.cn-search input:focus-visible{outline:2px solid var(--cn-accent);outline-offset:1px}",
 			".cn-ico{width:14px;height:14px;display:inline-block;vertical-align:-2px;fill:currentColor}",
 			".cn-warn{flex:none;color:var(--cn-warn);background:var(--cn-warn-bg);border-radius:6px;padding:3px 10px;font-size:12px;line-height:16px;margin:6px 10px 0}",
 			".cn-body{position:relative;flex:1;min-height:0;overflow:auto;margin-top:6px;border-top:1px solid var(--cn-border)}",
@@ -80,6 +82,7 @@ window.__ModuleLoader__.load({
 			".cn-symclose:hover{color:var(--cn-accent)}",
 			".cn-symrow{display:flex;align-items:center;gap:6px;padding:3px 8px;border-radius:7px;cursor:pointer;font-size:12px;line-height:18px}",
 			".cn-symrow:hover{background:var(--cn-line-hover)}",
+			".cn-symrow:focus-visible{outline:2px solid var(--cn-accent);outline-offset:-2px;background:var(--cn-line-hover)}",
 			".cn-symkind{flex:none;font-size:10px;line-height:14px;border-radius:5px;padding:0 5px;color:var(--cn-accent);border:1px solid var(--cn-accent);opacity:.9}",
 			".cn-symname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:var(--cn-fg)}",
 			".cn-symname .cn-symcont{color:var(--cn-dim)}",
@@ -473,7 +476,10 @@ window.__ModuleLoader__.load({
 			"symbols": "符号",
 			"symbols.close": "关闭符号列表 (Esc)",
 			"symbols.empty": "未识别到符号",
+			"symbols.capped": "符号过多，仅列出前 {n} 个",
+			"symbols.jump": "跳转到第 {line} 行",
 			"search.placeholder": "在文件中查找…",
+			"search.aria": "查找内容",
 			"search.case": "区分大小写",
 			"search.prev": "上一个",
 			"search.next": "下一个",
@@ -493,7 +499,10 @@ window.__ModuleLoader__.load({
 			"symbols": "Symbols",
 			"symbols.close": "Close symbols (Esc)",
 			"symbols.empty": "No symbols found",
+			"symbols.capped": "Too many symbols — listing the first {n}",
+			"symbols.jump": "Jump to line {line}",
 			"search.placeholder": "Find in file…",
+			"search.aria": "Find query",
 			"search.case": "Match case",
 			"search.prev": "Previous",
 			"search.next": "Next",
@@ -544,8 +553,17 @@ window.__ModuleLoader__.load({
 			}
 		};
 
+		/**
+		 * React 18 的 useDeferredValue；宿主是更旧的 React 时退化成直通。
+		 * 插件不能因为一个可选的调度 API 缺失而整个不加载。
+		 */
+		const useDeferredValue = react.useDeferredValue ?? ((v) => v);
+
 		function CodePreviewView(props) {
 			const { ctx, scope, path, title, content, truncated } = props;
+			// 声明先于使用：commitSelPop 等回调都引用 t，原来放在函数末尾只是历史顺序，
+			// 任何人把回调提前调用一次就会撞上 TDZ。
+			const t = ctxLocale(ctx);
 			const codeRef = react.useRef(null);
 			const [dark, setDark] = react.useState(() => detectDark());
 			const [filter, setFilter] = react.useState("all");
@@ -555,6 +573,9 @@ window.__ModuleLoader__.load({
 			const [caseSensitive, setCaseSensitive] = react.useState(false);
 			const [cur, setCur] = react.useState(0);
 			const flashTimer = react.useRef(null);
+			// 大文件里逐字符重算「全部匹配 + 每行高亮区间」会吃掉输入延迟：只有派生
+			// 结果需要延后，输入框本身保持受控即时。
+			const deferredQuery = useDeferredValue(query);
 			/** 选中文字浮层（视口锚定；null = 隐藏）。 */
 			const [selPop, setSelPop] = react.useState(null);
 			/** 浮层数据的实时镜像：全局监听器只注册一次，必须读 ref 而非闭包。 */
@@ -573,7 +594,9 @@ window.__ModuleLoader__.load({
 				const next = {
 					insert: insert,
 					left: Math.min(Math.max(left, 80), window.innerWidth - 80),
-					top: top
+					// 按钮用 translate(-100% - 8px) 挂在选区上方：top 小于「高 28 + 间距 8」
+					// 时会整块翻到视口外，选中最顶行时点不到。
+					top: Math.max(top, 36)
 				};
 				selPopRef.current = next;
 				setSelPop(next);
@@ -659,6 +682,13 @@ window.__ModuleLoader__.load({
 				hideSelPop();
 			}, [content, path]);
 
+			// 卸载时清掉闪烁定时器：跳完行立刻关面板/换插件时，回调还会在 1.6s 后
+			// 攥着这个组件的 setState 闭包跑一次。
+			react.useEffect(() => () => {
+				if (flashTimer.current !== null) clearTimeout(flashTimer.current);
+				flashTimer.current = null;
+			}, []);
+
 			/**
 			 * 代码区里选中文字 → 在其上方锚定「添加到对话」按钮。行号直接读
 			 * `data-cn-line` 行容器（比 markdown 预览的文本反查精确）。
@@ -666,7 +696,10 @@ window.__ModuleLoader__.load({
 			const onCodeMouseUp = () => {
 				const sel = window.getSelection();
 				const host = codeRef.current;
-				if (sel === null || sel.isCollapsed || sel.anchorNode === null || sel.focusNode === null || host === null) {
+				// rangeCount 为 0 时 isCollapsed 也返回 true，但 getRangeAt(0) 是抛
+				// IndexSizeError 的 —— 显式判一次，别把安全性压在 isCollapsed 的规范细节上。
+				if (sel === null || sel.rangeCount === 0 || sel.isCollapsed
+					|| sel.anchorNode === null || sel.focusNode === null || host === null) {
 					hideSelPop();
 					return;
 				}
@@ -702,17 +735,25 @@ window.__ModuleLoader__.load({
 				[tokens]
 			);
 			const symbols = react.useMemo(() => {
-				if (typeof content !== "string") return [];
-				return __cn.clipToRenderWindow(__cn.outlineOf(content, lang), renderedCount);
+				if (typeof content !== "string") return { list: [], capped: false };
+				const all = __cn.outlineOf(content, lang);
+				// capped 必须看裁剪前的长度：大纲静默截断到 OUTLINE_MAX_SYMBOLS，
+				// 不告诉用户就会以为「符号」按钮漏了。
+				return {
+					list: __cn.clipToRenderWindow(all, renderedCount),
+					capped: all.length >= __cn.OUTLINE_MAX_SYMBOLS
+				};
 			}, [content, lang, renderedCount]);
 			const matches = react.useMemo(() => {
 				if (typeof content !== "string") return [];
 				return __cn.clipZeroBasedToRenderWindow(
-					__cn.findMatches(content, query, { caseSensitive }),
+					__cn.findMatches(content, deferredQuery, { caseSensitive }),
 					renderedCount
 				);
-			}, [content, query, caseSensitive, renderedCount]);
+			}, [content, deferredQuery, caseSensitive, renderedCount]);
 			const curIndex = matches.length > 0 ? Math.min(cur, matches.length - 1) : -1;
+			// findMatches 静默封顶在 MAX_MATCHES：达到上限时真实匹配数只会更多
+			const matchCapped = matches.length >= __cn.MAX_MATCHES;
 			// 内容行数超出渲染窗口：文件被截断显示，搜索与大纲只覆盖窗口内
 			const lineCapped = tokens !== null && renderedCount < tokens.length;
 
@@ -769,8 +810,7 @@ window.__ModuleLoader__.load({
 				else if (e.key === "Escape") { setSymOpen(false); }
 			};
 
-			const filtered = symbols.filter((s) => filter === "all" || __cn.kindGroup(s.kind) === filter);
-			const t = ctxLocale(props.ctx);
+			const filtered = symbols.list.filter((s) => filter === "all" || __cn.kindGroup(s.kind) === filter);
 
 			const palette = PALETTES[dark ? "dark" : "light"];
 			const rootStyle = {};
@@ -780,45 +820,60 @@ window.__ModuleLoader__.load({
 				rootStyle["--cn-" + cssKey] = palette[k];
 			}
 
-			const rows = [];
-			const maxLines = renderedCount;
-			for (let i = 0; i < maxLines; i++) {
-				const raw = tokens[i].raw;
-				const lm = lineMatches.get(i);
-				const lineMatchArr = lm === undefined ? [] : lm;
-				let currentHere = -1;
-				if (curIndex >= 0 && matches[curIndex].line === i) {
-					currentHere = lineMatchArr.findIndex((m) => m.col === matches[curIndex].col);
+			// 行节点 memo 化：不 memo 的话每次 setState（开关符号列表、改筛选、
+			// 上/下跳）都会重建最多 20000 行的元素树，而 React 还要逐个 diff。
+			const rows = react.useMemo(() => {
+				if (tokens === null) return [];
+				const out = [];
+				const maxLines = renderedCount;
+				for (let i = 0; i < maxLines; i++) {
+					const raw = tokens[i].raw;
+					const lm = lineMatches.get(i);
+					const lineMatchArr = lm === undefined ? [] : lm;
+					let currentHere = -1;
+					if (curIndex >= 0 && matches[curIndex].line === i) {
+						currentHere = lineMatchArr.findIndex((m) => m.col === matches[curIndex].col);
+					}
+					const spans = __cn.spansOfLine(raw, tokens[i].segs, lineMatchArr, currentHere);
+					const lineNodes = [];
+					for (let s = 0; s < spans.length; s++) {
+						const sp = spans[s];
+						const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : sp.cls === "c-key" ? "cn-key" : sp.cls === "c-section" ? "cn-sec" : sp.cls === "c-tag" ? "cn-tag" : sp.cls === "c-attr" ? "cn-attr" : "";
+						const extra = sp.match ? (sp.current ? " cn-cu" : " cn-m") : "";
+						lineNodes.push(jsx("span", { key: s, className: cls + extra, "data-cn-cur": sp.current ? "1" : undefined, children: sp.text }));
+					}
+					out.push(jsxs("div", {
+						key: i,
+						className: "cn-line" + (flashLine === i + 1 ? " flash" : ""),
+						"data-cn-line": i + 1,
+						children: [
+							jsx("span", { className: "cn-ln", children: i + 1 }),
+							jsx("span", { className: "cn-code-wrap", children: lineNodes })
+						]
+					}));
 				}
-				const spans = __cn.spansOfLine(raw, tokens[i].segs, lineMatchArr, currentHere);
-				const lineNodes = [];
-				for (let s = 0; s < spans.length; s++) {
-					const sp = spans[s];
-					const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : sp.cls === "c-key" ? "cn-key" : sp.cls === "c-section" ? "cn-sec" : sp.cls === "c-tag" ? "cn-tag" : sp.cls === "c-attr" ? "cn-attr" : "";
-					const extra = sp.match ? (sp.current ? " cn-cu" : " cn-m") : "";
-					lineNodes.push(jsx("span", { key: s, className: cls + extra, "data-cn-cur": sp.current ? "1" : undefined, children: sp.text }));
-				}
-				rows.push(jsxs("div", {
-					key: i,
-					className: "cn-line" + (flashLine === i + 1 ? " flash" : ""),
-					"data-cn-line": i + 1,
-					children: [
-						jsx("span", { className: "cn-ln", children: i + 1 }),
-						jsx("span", { className: "cn-code-wrap", children: lineNodes })
-					]
-				}));
-			}
+				return out;
+			}, [tokens, renderedCount, lineMatches, matches, curIndex, flashLine]);
 
 			const symNodes = [];
 			if (filtered.length === 0) {
 				symNodes.push(jsx("div", { key: "empty", className: "cn-empty", children: t("symbols.empty") }));
 			} else {
+				const pickSymbol = (s) => { jumpToLine(s.line); setSymOpen(false); };
 				for (let i = 0; i < filtered.length; i++) {
 					const s = filtered[i];
 					symNodes.push(jsxs("div", {
 						key: i,
 						className: "cn-symrow",
-						onClick: (e) => { e.stopPropagation(); jumpToLine(s.line); setSymOpen(false); },
+						// 行是 div，键盘够不着：声明成 button 并接 Enter/Space，
+						// 否则「符号」列表对只用键盘的人等于不存在。
+						role: "button",
+						tabIndex: 0,
+						"aria-label": t("symbols.jump").replace("{line}", String(s.line)),
+						onClick: (e) => { e.stopPropagation(); pickSymbol(s); },
+						onKeyDown: (e) => {
+							if (e.key === "Enter" || e.key === " ") { e.preventDefault(); e.stopPropagation(); pickSymbol(s); }
+						},
 						children: [
 							jsx("span", { className: "cn-symkind", children: KIND_META[s.kind] ?? "?" }),
 							jsx("span", { className: "cn-symname", children: s.container === undefined ? s.name : jsxs(react.Fragment, { children: [s.name, jsx("span", { className: "cn-symcont", children: " — " + s.container })] }) }),
@@ -856,6 +911,7 @@ window.__ModuleLoader__.load({
 							jsx("button", {
 								type: "button",
 								className: "cn-symbtn",
+								"aria-expanded": symOpen,
 								onClick: () => setSymOpen((v) => !v),
 								children: t("symbols") + " (" + filtered.length + ")"
 							})
@@ -871,18 +927,24 @@ window.__ModuleLoader__.load({
 										type: "text",
 										value: query,
 										placeholder: t("search.placeholder"),
+										"aria-label": t("search.aria"),
 										onChange: (e) => onQuery(e.target.value),
 										onKeyDown: onKeyDown,
 										spellCheck: false
 									}),
 									jsx("span", {
 										className: "cn-count",
-										children: matches.length === 0 ? (query.length > 0 ? t("search.noMatch") : "") : (curIndex + 1) + "/" + matches.length
+										children: matches.length === 0
+											// 延后的查询值还没追上时别说「无匹配」
+											? (deferredQuery.length > 0 ? t("search.noMatch") : "")
+											: (curIndex + 1) + "/" + (matchCapped ? __cn.MAX_MATCHES + "+" : matches.length)
 									}),
 									jsx("button", {
 										type: "button",
 										className: "cn-mini" + (caseSensitive ? " on" : ""),
 										title: t("search.case"),
+										"aria-label": t("search.case"),
+										"aria-pressed": caseSensitive,
 										onClick: () => { setCaseSensitive((v) => !v); setCur(0); },
 										children: "Aa"
 									}),
@@ -890,6 +952,7 @@ window.__ModuleLoader__.load({
 										type: "button",
 										className: "cn-mini",
 										title: t("search.prev"),
+										"aria-label": t("search.prev"),
 										onClick: () => step(-1),
 										children: "↑"
 									}),
@@ -897,6 +960,7 @@ window.__ModuleLoader__.load({
 										type: "button",
 										className: "cn-mini",
 										title: t("search.next"),
+										"aria-label": t("search.next"),
 										onClick: () => step(1),
 										children: "↓"
 									})
@@ -907,6 +971,9 @@ window.__ModuleLoader__.load({
 					truncated === true ? jsx("div", { className: "cn-warn", children: t("truncated") }) : null,
 					lineCapped === true
 						? jsx("div", { className: "cn-warn", children: t("lineCapped").replace("{n}", String(renderedCount)).replace("{total}", String(tokens.length)) })
+						: null,
+					symbols.capped === true
+						? jsx("div", { className: "cn-warn", children: t("symbols.capped").replace("{n}", String(__cn.OUTLINE_MAX_SYMBOLS)) })
 						: null,
 					jsxs("div", {
 						className: "cn-body",
