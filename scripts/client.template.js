@@ -741,19 +741,19 @@ window.__ModuleLoader__.load({
 				// 不告诉用户就会以为「符号」按钮漏了。
 				return {
 					list: __cn.clipToRenderWindow(all, renderedCount),
-					capped: all.length >= __cn.OUTLINE_MAX_SYMBOLS
+					capped: all.capped === true
 				};
 			}, [content, lang, renderedCount]);
 			const matches = react.useMemo(() => {
 				if (typeof content !== "string") return [];
-				return __cn.clipZeroBasedToRenderWindow(
-					__cn.findMatches(content, deferredQuery, { caseSensitive }),
-					renderedCount
-				);
+				const all = __cn.findMatches(content, deferredQuery, { caseSensitive });
+				const visible = __cn.clipZeroBasedToRenderWindow(all, renderedCount);
+				if (all.capped === true) Object.defineProperty(visible, "capped", { value: true, enumerable: false });
+				return visible;
 			}, [content, deferredQuery, caseSensitive, renderedCount]);
 			const curIndex = matches.length > 0 ? Math.min(cur, matches.length - 1) : -1;
-			// findMatches 静默封顶在 MAX_MATCHES：达到上限时真实匹配数只会更多
-			const matchCapped = matches.length >= __cn.MAX_MATCHES;
+			// findMatches 只在确实探测到第 N+1 条时标记 capped。
+			const matchCapped = matches.capped === true;
 			// 内容行数超出渲染窗口：文件被截断显示，搜索与大纲只覆盖窗口内
 			const lineCapped = tokens !== null && renderedCount < tokens.length;
 

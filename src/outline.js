@@ -267,9 +267,23 @@ function extractScriptBlocks(text) {
 /** 符号数量上限（挡住巨型文件的大纲开销，也用于界面提示「仅前 N 个」）。 */
 export const OUTLINE_MAX_SYMBOLS = 500;
 
+/** 在不改变数组内容 / deepEqual 结果的前提下标记确实被截断。 */
+function markOutlineCapped(items) {
+  if (items.capped !== true) Object.defineProperty(items, "capped", { value: true, enumerable: false });
+  return items;
+}
+
 /** 裁到符号上限；调用方据此判断列表是否被截断。 */
 function capSymbols(symbols) {
-  return symbols.length > OUTLINE_MAX_SYMBOLS ? symbols.slice(0, OUTLINE_MAX_SYMBOLS) : symbols;
+  return symbols.length > OUTLINE_MAX_SYMBOLS
+    ? markOutlineCapped(symbols.slice(0, OUTLINE_MAX_SYMBOLS))
+    : symbols;
+}
+
+/** 映射行号时保留子列表是否已经触及截断。 */
+function remapLines(symbols, offset) {
+  const mapped = symbols.map((s) => ({ ...s, line: s.line + offset }));
+  return symbols.capped === true ? markOutlineCapped(mapped) : mapped;
 }
 
 /** 主入口：文本 + 语言 id → 符号列表（失败返回 []）。 */
@@ -281,15 +295,19 @@ export function outlineOf(text, lang) {
       if (blocks.length === 0) return [];
       if (blocks.length === 1) {
         const { code, offset, subLang } = blocks[0];
-        return outlineOf(code, subLang).map((s) => ({ ...s, line: s.line + offset }));
+        return remapLines(outlineOf(code, subLang), offset);
       }
       // 多块：各块内部已按语言规则解析，合并后按行号排回文档顺序
       const merged = [];
+      let capped = false;
       for (const b of blocks) {
-        for (const s of outlineOf(b.code, b.subLang)) merged.push({ ...s, line: s.line + b.offset });
+        const blockSymbols = outlineOf(b.code, b.subLang);
+        if (blockSymbols.capped === true) capped = true;
+        for (const s of blockSymbols) merged.push({ ...s, line: s.line + b.offset });
       }
       merged.sort((a, b) => a.line - b.line);
-      return capSymbols(merged);
+      const result = capSymbols(merged);
+      return capped ? markOutlineCapped(result) : result;
     }
     const tokens = tokenizeLines(text, lang);
     if (tokens === null) return [];

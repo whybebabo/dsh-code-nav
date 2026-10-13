@@ -8,6 +8,12 @@
 /** 单次查找返回的匹配上限（界面据此提示「还有更多」，避免看起来只有 2000 处）。 */
 export const MAX_MATCHES = 2000;
 
+/** 在不改变数组内容 / deepEqual 结果的前提下标记确实存在第 N+1 条匹配。 */
+function markSearchCapped(items) {
+  if (items.capped !== true) Object.defineProperty(items, "capped", { value: true, enumerable: false });
+  return items;
+}
+
 /**
  * 转义正则元字符，让查询串按字面量匹配。
  * @param {string} s
@@ -50,6 +56,9 @@ export function findMatches(text, query, opts = {}) {
     // 查询串非空且已全部转义成字面量，匹配长度必然 >= 1；这里只是防止 lastIndex 卡住。
     if (re.lastIndex === at) re.lastIndex = at + 1;
   }
+  // 循环在达到上限时停在最后一条匹配之后；只额外探测一条，区分「恰好 N 条」
+  // 与「至少 N+1 条」，避免界面把恰好达到上限的结果误报成还有更多。
+  if (out.length === MAX_MATCHES && re.exec(text) !== null) markSearchCapped(out);
   return out;
 }
 

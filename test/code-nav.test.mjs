@@ -664,7 +664,22 @@ test("outline: symbol count is capped at OUTLINE_MAX_SYMBOLS", () => {
   const code = Array.from({ length: OUTLINE_MAX_SYMBOLS + 40 }, (_, i) => "function f" + i + "() {}").join("\n");
   const s = outlineOf(code, "javascript");
   assert.equal(s.length, OUTLINE_MAX_SYMBOLS);
+  assert.equal(s.capped, true);
   assert.equal(s[0].name, "f0", "应保留文件里靠前的符号");
+  const exact = outlineOf(
+    Array.from({ length: OUTLINE_MAX_SYMBOLS }, (_, i) => "function exact" + i + "() {}").join("\n"),
+    "javascript"
+  );
+  assert.equal(exact.length, OUTLINE_MAX_SYMBOLS);
+  assert.equal(exact.capped, undefined, "恰好达到上限不应提示还有更多符号");
+  const multi = outlineOf(
+    "<script>\n" + Array.from({ length: OUTLINE_MAX_SYMBOLS + 1 }, (_, i) => "function a" + i + "() {}").join("\n") +
+      "\n</script>\n<script setup>\n" + Array.from({ length: OUTLINE_MAX_SYMBOLS + 1 }, (_, i) => "function b" + i + "() {}").join("\n") +
+      "\n</script>",
+    "vue"
+  );
+  assert.equal(multi.length, OUTLINE_MAX_SYMBOLS);
+  assert.equal(multi.capped, true, "多 script 块合并后仍应保留截断标记");
 });
 
 test("outline ignores symbols inside comments/strings", () => {
@@ -1181,7 +1196,12 @@ test("findMatches: the query is a literal, not a pattern", () => {
 
 test("findMatches: stops at MAX_MATCHES", () => {
   const text = "ab".repeat(MAX_MATCHES + 50);
-  assert.equal(findMatches(text, "ab", {}).length, MAX_MATCHES);
+  const capped = findMatches(text, "ab", {});
+  assert.equal(capped.length, MAX_MATCHES);
+  assert.equal(capped.capped, true);
+  const exact = findMatches("ab".repeat(MAX_MATCHES), "ab", {});
+  assert.equal(exact.length, MAX_MATCHES);
+  assert.equal(exact.capped, undefined, "恰好达到上限不应显示还有更多匹配");
 });
 
 test("spansOfLine: match overlay", () => {
