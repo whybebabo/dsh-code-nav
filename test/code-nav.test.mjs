@@ -1718,6 +1718,22 @@ test("CI workflow builds, checks, tests and refuses a stale bundle", () => {
   }
   // 事件上下文绝不插进 shell（`${{ }}` 注入是 workflow 里的经典 RCE）
   assert.ok(!/\$\{\{\s*(github\.event|env)\b[^}]*\}\}/.test(ci.split("jobs:")[1] || ""), "CI 把事件上下文放进 shell");
+  // 冒号哨兵：CI 没有第三方 YAML 解析器可用，而未加引号、值里带「: 」的标量（step 名里
+  // 写「dry run: …」就是这样）会让 workflow 直接解析失败 —— GitHub 那边只留下一个
+  // 「名字是文件路径、0 个 job、结论 failure」的运行，本地一切照旧绿。
+  const unquoted = [];
+  for (const [i, line] of ci.split("\n").entries()) {
+    const t = line.trim();
+    if (t.length === 0 || t.startsWith("#")) continue;
+    const m = /^(?:-\s+)?(name|run|uses|id|if):(.*)$/.exec(t);
+    if (m === null) continue;
+    const value = m[2];
+    if (/^\s*[|>&*]/.test(value)) continue;              // 块标量 / 锚点 / 别名
+    const plain = value.trim();
+    if (/^"[^"]*"$/.test(plain) || /^'[^']*'$/.test(plain)) continue;
+    if (/: /.test(value)) unquoted.push((i + 1) + ": " + t);
+  }
+  assert.deepEqual(unquoted, [], "存在未加引号且含「: 」的标量，workflow 会解析失败");
 });
 
 test("README states the real test count", () => {

@@ -35,7 +35,7 @@ jobs:
         # 工作区还出 diff 就说明提交里的 lib/client.js 不是由当前 src/ 模板产生的。
         run: git diff --exit-code -- lib/client.js
 
-      - name: Release plan (dry run: packs the artifact, writes nothing remote)
+      - name: "Release plan (dry run: packs the artifact, writes nothing remote)"
         # 发布脚本的目标仓库 / 版本 / tag / 产物名全部从 package.json 派生；
         # --dry-run 会在取凭据之前退出，所以这里既验证派生也验证产物前置条件。
         run: |
