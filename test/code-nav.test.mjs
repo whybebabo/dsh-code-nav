@@ -2076,6 +2076,8 @@ test("release-config: remote URLs normalise across HTTPS / SSH / git+ forms", as
     "https://github.com/o/r.git", "https://github.com/o/r", "http://github.com/o/r.git",
     "git+https://github.com/o/r.git", "git@github.com:o/r.git", "git@github.com:o/r",
     "ssh://git@github.com/o/r.git", "git://github.com/o/r.git", "git@github.com:o/r/",
+    // GitHub 官方的 443 端口 SSH 端点（禁止 github.com:22 的网络只能用这条通道）
+    "ssh://git@ssh.github.com:443/o/r.git", "ssh://git@ssh.github.com/o/r.git", "git@ssh.github.com:o/r.git",
   ]) {
     assert.equal(mod.normalizeRemoteRepo(url), "o/r", "normalise failed: " + url);
     assert.equal(mod.isSameRepo(url, "o/r"), true, "isSameRepo failed: " + url);

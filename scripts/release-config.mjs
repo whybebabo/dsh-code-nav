@@ -84,6 +84,8 @@ export function repoOf(pkg = readPkg()) {
  * - `git+https://github.com/o/r.git`（package.json 的常见写法）
  * - `git@github.com:o/r.git`（SSH，最常见的推送配置）
  * - `ssh://git@github.com/o/r.git`
+ * - `ssh://git@ssh.github.com:443/o/r.git`（GitHub 官方的 443 端口 SSH 端点；
+ *   禁止 github.com:22 出站的网络只能用这条通道，本机的 origin 即是此形式）
  *
  * @param {string} url
  * @returns {string|null} `owner/repo`，或 null
@@ -96,8 +98,11 @@ export function normalizeRemoteRepo(url) {
   const noScheme = s.replace(/^(?:git\+)?(?:https?|ssh|git):\/\//i, "");
   // 去掉 user@（git@ / ssh 形式）
   const noUser = noScheme.replace(/^[^@/]+@/, "");
+  // ssh.github.com 是 GitHub 自己的备用 SSH 端点，与 github.com 同一仓库。
+  // 端口可有可无（`:443` / `:22`），分隔符可为 `/`（ssh URL）或 `:`（scp-like）。
+  const noAlias = noUser.replace(/^ssh\.github\.com(?::\d+)?[/:]/i, "github.com/");
   // github.com 后的分隔符可能是 `/`（URL）或 `:`（scp-like）
-  const m = /^github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(noUser);
+  const m = /^github\.com[/:]([^/]+)\/([^/]+?)(?:\.git)?\/?$/i.exec(noAlias);
   if (m === null) return null;
   return m[1] + "/" + m[2];
 }
