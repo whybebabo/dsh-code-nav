@@ -25,6 +25,11 @@ test("langOf maps extensions", () => {
   assert.equal(langOf(""), null);
 });
 
+test("langOf maps proto", () => {
+  assert.equal(langOf("api/user.proto"), "protobuf");
+  assert.equal(langOf("C:\\repo\\service.proto"), "protobuf");
+});
+
 test("langOf maps config extensions", () => {
   assert.equal(langOf("package.json"), "json");
   assert.equal(langOf("tsconfig.jsonc"), "json");
@@ -88,6 +93,23 @@ test("tokenize python: triple-quote cross-line", () => {
 test("tokenize rust: raw string tolerated", () => {
   const t = tokenizeLines('let s = r#"a"b"#;\nlet n = 42;', "rust");
   assert.ok(t[0].segs.some((s) => s.cls === "c-string"));
+});
+
+test("tokenize protobuf: keywords, types, strings and both comment forms", () => {
+  const t = tokenizeLines(
+    'syntax = "proto3"; // 版本\n/* 包\n   说明 */\nmessage User {\n  repeated Address a = 1;\n  map<string, int32> n = 2;\n}',
+    "protobuf"
+  );
+  const cls = (i) => t[i].segs.map((s) => s.cls).join(",");
+  assert.ok(cls(0).includes("c-kw"), cls(0));
+  assert.ok(cls(0).includes("c-string"), cls(0));
+  assert.ok(cls(0).includes("c-comment"), cls(0));
+  assert.ok(t[1].segs.every((s) => s.cls === "c-comment"), "块注释起始行未整行上色");
+  assert.ok(t[2].segs.every((s) => s.cls === "c-comment"), "块注释未跨行保持");
+  assert.ok(cls(4).includes("c-kw"), cls(4));     // repeated
+  assert.ok(cls(4).includes("c-type"), cls(4));   // Address
+  assert.ok(cls(5).includes("c-kw"), cls(5));     // map
+  assert.ok(cls(5).includes("c-type"), cls(5));   // string / int32
 });
 
 // ---------- tokenize: config formats ----------
@@ -657,6 +679,144 @@ CREATE VIEW active_users AS SELECT * FROM users;
   const names = s.map((x) => x.kind + ":" + x.name);
   assert.ok(names.includes("class:users"));
   assert.ok(names.includes("interface:active_users"));
+});
+
+test("outline protobuf: message, enum, field, oneof, service, rpc", () => {
+  const code = `
+syntax = "proto3";
+
+package example.user;
+
+import "google/protobuf/timestamp.proto";
+
+option java_package = "com.example";
+
+message User {
+  string id = 1;
+  repeated Address addresses = 2;
+  map<string, int32> login_counts = 3;
+  oneof contact {
+    string email = 4;
+    string phone = 5;
+  }
+  message Address {
+    string city = 1;
+  }
+  enum Status {
+    ACTIVE = 0;
+    BANNED = 1;
+  }
+}
+
+service UserService {
+  rpc Get (UserRequest) returns (User);
+  rpc Watch(stream WatchRequest) returns (stream WatchReply) {}
+}
+
+extend google.protobuf.FieldOptions {
+  string audit = 50000;
+}
+`;
+  const s = outlineOf(code, "protobuf");
+  assert.deepEqual(s.map((x) => x.kind + ":" + x.name), [
+    "class:User", "field:id", "field:addresses", "field:login_counts",
+    "section:contact", "field:email", "field:phone",
+    "class:Address", "field:city",
+    "enum:Status", "constant:ACTIVE", "constant:BANNED",
+    "class:UserService", "method:Get", "method:Watch",
+    "impl:google.protobuf.FieldOptions", "field:audit"
+  ], JSON.stringify(s));
+  const at = (n) => s.find((x) => x.name === n);
+  assert.equal(at("id").container, "User");
+  assert.equal(at("email").container, "contact");
+  assert.equal(at("city").container, "Address");
+  assert.equal(at("ACTIVE").container, "Status");
+  assert.equal(at("Get").container, "UserService");
+  assert.equal(at("audit").container, "google.protobuf.FieldOptions");
+});
+
+test("outline protobuf: metadata and commented-out code create no symbols", () => {
+  const code = `
+import "x.proto";
+
+message M {
+  option deprecated = true;
+  reserved 2, 15, 90 to 100;
+  reserved "OLD_NAME", "OTHER";
+  extensions 100 to max;
+  // int32 ghost = 1;
+  /* int32 ghost2 = 2; */
+  string note = 2 [default = "message Fake { int32 hidden = 3; }"];
+  int32 real = 3;
+}
+`;
+  const s = outlineOf(code, "protobuf");
+  assert.deepEqual(s.map((x) => x.kind + ":" + x.name),
+    ["class:M", "field:note", "field:real"], JSON.stringify(s));
+  // 字符串里的 `{` 不能污染大括号深度，否则 note 之后的字段就找不到所属 message 了
+  assert.equal(s[s.length - 1].container, "M");
+});
+
+test("outline protobuf: proto2 required / group / default / negative enum value", () => {
+  const code = `
+syntax = "proto2";
+
+import "google/protobuf/descriptor.proto";
+
+option java_package = "com.x";
+
+message Envelope {
+  option (table) = "t_envelope";
+  option (ttl) = 3600;
+  required string id = 1;
+  optional int32 retry = 2 [default = 3];
+  optional string label = 3 [default = "message Fake { required int32 x = 1; }"];
+  optional google.protobuf.Timestamp updated_at = 4;
+  reserved 6, 8 to 10;
+  extensions 100 to max;
+  optional group Legacy = 5 {
+    required string name = 1;
+  }
+  enum Sentiment {
+    NEGATIVE = -1;
+    POSITIVE = 1 [deprecated = true];
+  }
+}
+`;
+  const s = outlineOf(code, "protobuf");
+  assert.deepEqual(s.map((x) => x.kind + ":" + x.name), [
+    "class:Envelope", "field:id", "field:retry", "field:label", "field:updated_at",
+    "field:Legacy", "field:name", "enum:Sentiment",
+    "constant:NEGATIVE", "constant:POSITIVE"
+  ], JSON.stringify(s));
+  const at = (n) => s.find((x) => x.name === n);
+  assert.equal(at("updated_at").container, "Envelope");   // 类型名带点号不影响取字段名
+  assert.equal(at("NEGATIVE").container, "Sentiment");    // proto2 的枚举值可为负
+  assert.equal(at("Legacy").container, "Envelope");       // group 自身是 Envelope 的字段
+  assert.equal(at("name").container, "Legacy");           // 但组体是独立作用域，组内字段挂组名
+});
+
+test("outline protobuf: fully-qualified leading-dot names", () => {
+  const code = `
+syntax = "proto3";
+
+extend .google.protobuf.FieldOptions {
+  string audit = 1;
+}
+
+message M {
+  optional .foo.Bar leading = 1;
+  .foo.Baz direct = 2;
+}
+`;
+  const s = outlineOf(code, "protobuf");
+  assert.deepEqual(s.map((x) => x.kind + ":" + x.name), [
+    "impl:google.protobuf.FieldOptions", "field:audit",
+    "class:M", "field:leading", "field:direct"
+  ], JSON.stringify(s));
+  const at = (n) => s.find((x) => x.name === n);
+  assert.equal(at("audit").container, "google.protobuf.FieldOptions");
+  assert.equal(at("leading").container, "M");
 });
 
 test("outline: symbol count is capped at OUTLINE_MAX_SYMBOLS", () => {

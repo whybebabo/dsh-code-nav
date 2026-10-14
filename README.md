@@ -3,10 +3,10 @@
 <div align="center">🌏 <a href="./README_EN.md"><b>English</b></a> · 中文</div>
 
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
-> 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2 起）与
-> **常见配置文件支持**（v0.2.0 起），并以
+> 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2 起）、
+> **常见配置文件支持**（v0.2.0 起）与 **Protocol Buffers 支持**（v0.3.0 起），并以
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
-> 发布到 npm（当前版本 **0.2.2**）。
+> 发布到 npm（当前版本 **0.3.0**）。
 > 差异见下方[**Fork 说明**](#fork-说明)；v0.1.2 的改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -33,10 +33,6 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 装完**重启 `dsh web`**（新增 bundle 需 host 侧重载），再硬刷新浏览器（Cmd/Ctrl+Shift+R）。
 
-> 本插件**仅支持 web**（`dsh.profile.client.platform` 为 `web`）。请用 `web` profile：
-> `desktop` profile 由 Electron 应用独占，CLI 会被拒绝
-> （`error: profile "desktop" is managed exclusively by the Electron application`）。
-
 > 提示：better-sidebar 设置页「侧边卡片」中可看到本插件的预览器开关（代码预览导航 / Code Preview Navigator），关闭即回退到内置 CodeMirror 编辑器。
 
 > ⚠️ **不要与上游 `dsh-code-nav` 同时安装** —— 两者注册同一个预览器 id（`dsh-code-nav:outline`），会互相冲突。
@@ -46,7 +42,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 已经装过本插件时，请**指定精确版本**，不要只依赖 `^` 范围（版本号见上方「当前版本」或 `npm view @whybebabo/dsh-code-nav version`）：
 
 ```
-@whybebabo/dsh-code-nav@0.2.2
+@whybebabo/dsh-code-nav@0.3.0
 ```
 
 原因：pnpm 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— pnpm 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，pnpm 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
@@ -64,6 +60,12 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 > JSON 大纲的键会还原 `\n` `\"` `\uXXXX` 转义；查找 / 大纲的静默上限（2000 条匹配、500 个符号）
 > 现在会在界面上说明；符号行改为键盘可达；构建内联改用函数形式替换，修掉源码里的 `$&`
 > 被当成替换模式而**静默改写产物**的问题。详见[**开发**](#开发)与[**已知限制**](#已知限制)。
+>
+> 0.3.0 是**新增语言版**：支持 Protocol Buffers（`.proto`，proto2 / proto3）——
+> message / enum / oneof / service / extend 连同嵌套层级进大纲，rpc 成方法、
+> 字段（含 `optional` / `repeated` / `required` 标签与 `map<...>`）与枚举值成变量；
+> proto2 的 `group` 组体挂在组名下；`.foo.Bar` 这类全限定名也识别。
+> 详见下方[**支持的语言**](#支持的语言)。
 
 ## Fork 说明
 
@@ -71,9 +73,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 **为什么 fork**：上游以 `priority: 10` 注册预览器，`.ts` 等扩展名被它接管后，内置 `TextEditor` 不再挂载 —— 而 better-sidebar 的「选中文字 → 添加到对话」浮层只实现在 `TextEditor` 内部，`betterSidebar` 服务面也没有任何选区 / 浮层 / 草稿 API，导致这些文件直接失去该能力。上游暂无此功能，且有本地使用需求。
 
-**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持；v0.2.1 修样式归属；v0.2.2 修正确性并加固构建/发布链路）：
+**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持；v0.2.1 修样式归属；v0.2.2 修正确性并加固构建/发布链路；v0.3.0 新增 Protocol Buffers）：
 
-| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.2.2` |
+| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.3.0` |
 |---|---|---|
 | 选中文字 → 添加到对话 | ❌ 无（接管后该能力消失） | ✅ 选区上方浮层按钮 → 插入会话输入框 |
 | 插入载荷 | — | 与 better-sidebar 内置查看器同形状：`相对路径:起止行` 围栏块；>500 字只插路径行 |
@@ -81,12 +83,13 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 插入实现 | — | 优先官方 `captureInsertion()` / `insertText()`（一次可撤销、保留引用 chip、输入框忙时拒插且不动草稿），旧版宿主回退 `setDraft` |
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 配置文件支持 | ❌ 无（json / yaml / toml / xml 等落到内置查看器，无高亮与大纲） | ✅ JSON / YAML / TOML / XML / INI / properties / dotenv 的高亮 + 结构大纲 |
+| 新增语言 | ❌ 无 `.proto` | ✅ Protocol Buffers（`.proto`）高亮 + 大纲：message / enum / oneof / 字段 / service / rpc / extend |
 | 大纲 / 查找的正确性 | — | Vue / Svelte 多个 `<script>` 块都解析且行号回加原文坐标；大小写不敏感匹配的行列位置用原文坐标（`toLowerCase()` 后长度变化的字符不再错位）；JSON 键还原 `\uXXXX` 等转义；静默上限（2000 条匹配 / 500 个符号）在界面上说明 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
-| 版本 | 0.1.0（未发布 npm） | 0.2.x（已发布 npm，见 `package.json`） |
+| 版本 | 0.1.0（未发布 npm） | 0.3.x（已发布 npm，见 `package.json`） |
 | 构建产物 id | 硬编码 `dsh-code-nav` | 由 `scripts/build.mjs` 从 `package.json` 注入，改名不再漂移；构建期校验顶层重名 / 残留 import / 导出面 / 产物逐行等于源码 |
 | `<style>` 归属标记 | — | 以**完整包名**标记 `data-plugin`（v0.2.1 修）：client-modules 卸载 / 热替换时按包名回收样式，短名会让 `<style>` 残留、界面串味 |
-| 其余（高亮 / 大纲 / 查找 / 语言表） | 同上 | **无差异**，与上游一致 |
+| 其余（高亮 / 大纲 / 查找） | 同上 | **无差异**，与上游一致 |
 
 
 ## 支持的语言
@@ -103,6 +106,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | Lua / Shell | `.lua` `.sh` `.bash` `.zsh` |
 | Vue / Svelte | `.vue` `.svelte`（取各个 `<script>` 块解析：`<script>` 与 `<script setup>` 同时存在时都会列出符号，行号回加原文件坐标） |
 | SQL | `.sql`（表 / 视图 / 函数等结构对象） |
+| Protobuf | `.proto`（message / enum / 枚举值 / oneof / 字段 / service / rpc / extend 都进大纲） |
 | JSON | `.json` `.jsonc` `.json5` `.jsonl` `.ndjson` `.geojson` `.webmanifest` `.har` |
 | YAML | `.yaml` `.yml` |
 | TOML | `.toml` |
@@ -126,7 +130,7 @@ npm run release       # 发布演练（--dry-run，不写 git、不发网络请�
 
 `lib/client.js` 是**产物**，改了 `src/**` 或 `scripts/client.template.js` 都必须重新 `npm run build`，
 否则单测里的「产物 == 源码」逐字比对会失败（CI 同样会失败）。无第三方依赖，全程只用 node。
-`test/code-nav.test.mjs` 是纯逻辑单测（111 例：分词 + 各语言大纲 + 配置格式 + 查找 + 渲染窗口 + 选区载荷 + 构建校验 + 发布脚本派生 + 样式归属），
+`test/code-nav.test.mjs` 是纯逻辑单测（117 例：分词 + 各语言大纲 + 配置格式 + 查找 + 渲染窗口 + 选区载荷 + 构建校验 + 发布脚本派生 + 样式归属），
 其中一例会数本文件的 `test()` 数量并与两份 README 对齐 —— 加测试却忘改文档会直接失败。
 
 - `src/lang-registry.js` —— 扩展名映射 + 语言元数据（关键字 / 注释语法 / 字符串引号 / 配置格式的上色指令）

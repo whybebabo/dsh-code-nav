@@ -26,6 +26,8 @@ export const LANG_EXT = {
   vue: "vue", svelte: "svelte",
   // 数据
   sql: "sql",
+  // IDL：Protocol Buffers 的 schema
+  proto: "protobuf",
   // 配置：JSON 家族（jsonc 注释、json5 单引号 / 裸键由 json 元数据容忍）
   json: "json", jsonc: "json", json5: "json", jsonl: "json", ndjson: "json",
   geojson: "json", webmanifest: "json", har: "json",
@@ -200,6 +202,14 @@ export const LANG_META = {
     strings: ["'", '"'],
     keywords: "select from where insert into values update set delete create table view index alter drop truncate join inner left right full outer on group by order having limit offset union all distinct as asc desc and or not null primary key foreign references unique check default constraint begin commit rollback transaction case when then else end exists in like between is cast".split(" "),
     types: "int integer bigint smallint tinyint numeric decimal float real double money char varchar nvarchar text ntext binary varbinary bit date datetime timestamp time boolean json xml".split(" ")
+  },
+  protobuf: {
+    label: "Protobuf",
+    lineComment: "//", blockComment: ["/*", "*/"],
+    strings: ['"'],
+    keywords: "syntax import package option message enum oneof map repeated optional required reserved extensions extend service rpc returns stream group public to max true false".split(" "),
+    // 标量类型；message / enum 名是大写开头，由 tokenize 的类型启发式上色
+    types: "double float int32 int64 uint32 uint64 sint32 sint64 fixed32 fixed64 sfixed32 sfixed64 bool string bytes".split(" ")
   },
 
   // ---- 配置文件 ----

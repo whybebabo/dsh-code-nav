@@ -101,8 +101,8 @@ function extractBrace(lang, tokens, rules, lineCount) {
     if (matched !== null) {
       const kind = typeof matched.rule.kind === "function" ? matched.rule.kind(matched.m, depthBefore) : matched.rule.kind;
       const sym = { kind, name: matched.name, line: i + 1 };
-      // 方法/字段归属容器
-      if ((kind === "method" || kind === "field" || kind === "constructor") && stack.length > 0) {
+      // 方法 / 字段 / 常量归属容器（proto 的枚举值、类常量都要显示所属结构）
+      if ((kind === "method" || kind === "field" || kind === "constructor" || kind === "constant") && stack.length > 0) {
         sym.container = stack[stack.length - 1].name;
       }
       out.push(sym);
@@ -401,6 +401,28 @@ export function outlineOf(text, lang) {
         rules.push({ re: /^\s*(?:pub\s+)?impl\s+(?:<[^>]*>\s+)?([A-Za-z_]\w*(?:::\w+)*)/, kind: "impl", nameGroup: 1, depth: "any", container: true, endsWith: null });
         rules.push({ re: /^\s*(?:pub\s+)?(?:async\s+)?fn\s+([A-Za-z_]\w*)/, kind: (m, d) => d > 0 ? "method" : "function", nameGroup: 1, depth: "any", container: false, endsWith: null });
         rules.push({ re: /^\s*(?:pub\s+)?(?:const|static)\s+([A-Za-z_]\w*)/, kind: "constant", nameGroup: 1, depth: "any", container: false, endsWith: null });
+      } else if (lang === "protobuf") {
+        // Protocol Buffers：结构头 / rpc / group / 字段 / 枚举值。
+        // 字段是「类型 名 = 号」两个标识符、枚举值是「名 = 号」一个，字段规则在前即可分开两者；
+        // syntax / package / import / option / reserved / extensions 行凑不出这个形状
+        // （字符串与注释已被 cleanOf 剥掉），故不会误报成符号。
+        // 类型与被 extend 的目标允许前导点：`.foo.Bar` 是官方的全限定引用写法。
+        rules.push({
+          re: /^\s*(message|enum|oneof|service|extend)\s+\.?([A-Za-z_][\w.]*)/,
+          kind: (m) => m[1] === "enum" ? "enum" : m[1] === "oneof" ? "section" : m[1] === "extend" ? "impl" : "class",
+          nameGroup: 2, depth: "any", container: true, endsWith: null
+        });
+        rules.push({ re: /^\s*rpc\s+([A-Za-z_]\w*)\s*\(/, kind: "method", nameGroup: 1, depth: "gt0", container: false, endsWith: null });
+        // proto2 group：符号按字段展示，但组体是独立作用域，组内字段要挂到组名上
+        rules.push({
+          re: /^\s*(?:(?:repeated|optional|required)\s+)?group\s+([A-Za-z_]\w*)\s*=/,
+          kind: "field", nameGroup: 1, depth: "gt0", container: true, endsWith: null
+        });
+        rules.push({
+          re: /^\s*(?:(?:repeated|optional|required)\s+)?(?:map\s*<[^>]*>|\.?[A-Za-z_][\w.]*)\s+([A-Za-z_]\w*)\s*=\s*-?\d+/,
+          kind: "field", nameGroup: 1, depth: "gt0", container: false, endsWith: null
+        });
+        rules.push({ re: /^\s*([A-Za-z_]\w*)\s*=\s*-?\d+/, kind: "constant", nameGroup: 1, depth: "gt0", container: false, endsWith: null });
       } else {
         // 兜底：走通用 JS 规则
         rules.push({ re: METHOD_RE, kind: (m) => m[1] === "constructor" ? "constructor" : "method", nameGroup: 1, depth: "gt0", container: false, endsWith: needsBody });
