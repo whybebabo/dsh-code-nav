@@ -1331,6 +1331,7 @@ window.__ModuleLoader__.load({
 			"truncatedLines": "内容已截断到前 500KB（完整文件共 {total} 行）：查找与大纲只覆盖前 {n} 行",
 			"fileTooLarge": "文件过大（{size}），超出宿主内联预览上限",
 			"lineCapped": "文件过长，仅渲染前 {n} 行（共 {total} 行）：查找与大纲只覆盖已渲染的行",
+			"linePlain": "有 {n} 行过长，已关闭这些行的语法高亮以保证滚动流畅（内容仍完整、可选中/查找）",
 			"lineNotRendered": "无法跳转到第 {line} 行：当前只渲染了前 {n} 行",
 			"search.outsideWindow": "有匹配位于未渲染的行（查找仅覆盖前 {n} 行）",
 			"symbols.filteredEmpty": "当前筛选下没有符号",
@@ -1367,6 +1368,7 @@ window.__ModuleLoader__.load({
 			"truncatedLines": "Content truncated to the first 500KB (the file has {total} lines): find and outline cover the first {n} lines only",
 			"fileTooLarge": "File is too large ({size}) for the inline preview",
 			"lineCapped": "File is long — only the first {n} of {total} lines are rendered; find and outline cover rendered lines only",
+			"linePlain": "{n} line(s) are too long, so syntax highlighting is off for them to keep scrolling responsive (content is intact and still selectable/searchable)",
 			"lineNotRendered": "Cannot jump to line {line}: only the first {n} lines are rendered",
 			"search.outsideWindow": "Matches exist outside the rendered lines (find covers the first {n} lines only)",
 			"symbols.filteredEmpty": "No symbols match the current filter",
@@ -1455,24 +1457,41 @@ window.__ModuleLoader__.load({
 		 * @param {boolean} props.isCurrentLine 当前匹配是否在本行
 		 * @param {number|null} props.currentCol 当前匹配在本行的列（不在本行为 null）
 		 * @param {boolean} props.flashing 是否处于跳转闪烁区间
+		 * @param {boolean} props.plain 该行过长，已关闭逐 token 高亮（纯文本渲染）
 		 */
 		const LineRow = react.memo(function LineRow(props) {
-			const { lineNo, raw, segs, matches, isCurrentLine, currentCol, flashing } = props;
-			let currentHere = -1;
-			if (isCurrentLine && currentCol !== null) {
-				currentHere = matches.findIndex((m) => m.col === currentCol);
-			}
-			const spans = __cn.spansOfLine(raw, segs, matches, currentHere);
+			const { lineNo, raw, segs, matches, isCurrentLine, currentCol, flashing, plain } = props;
 			const lineNodes = [];
-			for (let s = 0; s < spans.length; s++) {
-				const sp = spans[s];
-				const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : sp.cls === "c-key" ? "cn-key" : sp.cls === "c-section" ? "cn-sec" : sp.cls === "c-tag" ? "cn-tag" : sp.cls === "c-attr" ? "cn-attr" : "";
-				const extra = sp.match ? (sp.current ? " cn-cu" : " cn-m") : "";
-				lineNodes.push(jsx("span", { className: cls + extra, "data-cn-cur": sp.current ? "1" : undefined, children: sp.text }, s));
+			if (plain) {
+				// 超长行：一个文本节点（或当前匹配处的三段）代替上万个 span。
+				// Chromium 对「同一行几十万个内联盒」的布局/绘制会卡死（见
+				// src/render-window.js 的 lineIsPlain）；纯文本仍可选中、可搜索跳转，
+				// 只是没有逐 token 着色。textContent 必须逐字等于 raw —— 选区载荷
+				// 直接读 .cn-code-wrap 的文本。
+				if (isCurrentLine && currentCol !== null && currentCol >= 0 && currentCol < raw.length) {
+					if (currentCol > 0) lineNodes.push(jsx("span", { children: raw.slice(0, currentCol) }, "b"));
+					lineNodes.push(jsx("span", { className: "cn-cu", "data-cn-cur": "1", children: raw[currentCol] }, "c"));
+					if (currentCol + 1 < raw.length) lineNodes.push(jsx("span", { children: raw.slice(currentCol + 1) }, "a"));
+				} else {
+					lineNodes.push(jsx("span", { children: raw }, "t"));
+				}
+			} else {
+				let currentHere = -1;
+				if (isCurrentLine && currentCol !== null) {
+					currentHere = matches.findIndex((m) => m.col === currentCol);
+				}
+				const spans = __cn.spansOfLine(raw, segs, matches, currentHere);
+				for (let s = 0; s < spans.length; s++) {
+					const sp = spans[s];
+					const cls = sp.cls === "c-comment" ? "cn-c" : sp.cls === "c-string" ? "cn-s" : sp.cls === "c-kw" ? "cn-k" : sp.cls === "c-type" ? "cn-t" : sp.cls === "c-num" ? "cn-n" : sp.cls === "c-fn" ? "cn-f" : sp.cls === "c-ident" ? "cn-i" : sp.cls === "c-key" ? "cn-key" : sp.cls === "c-section" ? "cn-sec" : sp.cls === "c-tag" ? "cn-tag" : sp.cls === "c-attr" ? "cn-attr" : "";
+					const extra = sp.match ? (sp.current ? " cn-cu" : " cn-m") : "";
+					lineNodes.push(jsx("span", { className: cls + extra, "data-cn-cur": sp.current ? "1" : undefined, children: sp.text }, s));
+				}
 			}
 			return jsxs("div", {
-				className: "cn-line" + (flashing ? " flash" : ""),
+				className: "cn-line" + (flashing ? " flash" : "") + (plain ? " cn-line-plain" : ""),
 				"data-cn-line": lineNo,
+				"data-cn-plain": plain ? "1" : undefined,
 				children: [
 					jsx("span", { className: "cn-ln", children: lineNo }, "ln"),
 					jsx("span", { className: "cn-code-wrap", children: lineNodes }, "code")
@@ -2014,11 +2033,24 @@ window.__ModuleLoader__.load({
 						matches: lineMatches.get(i) ?? EMPTY_MATCHES,
 						isCurrentLine: isCurrentLine,
 						currentCol: isCurrentLine ? currentCol : null,
-						flashing: flashRange !== null && i + 1 >= flashRange.start && i + 1 <= flashRange.end
+						flashing: flashRange !== null && i + 1 >= flashRange.start && i + 1 <= flashRange.end,
+						// 单行过长 / token 段太多 → 纯文本渲染，避免同一行里上万个
+						// 内联盒把 Chromium 的布局/绘制卡死（见 __cn.lineIsPlain）。
+						plain: __cn.lineIsPlain(tokens[i].raw, tokens[i].segs.length)
 					}, i));
 				}
 				return out;
 			}, [tokens, renderedCount, lineMatches, currentLine, currentCol, flashRange]);
+
+			// 有多少行因为过长而关闭了高亮：顶部提示一下，别让用户以为高亮坏了。
+			const plainLineCount = react.useMemo(() => {
+				if (tokens === null) return 0;
+				let n = 0;
+				for (let i = 0; i < renderedCount; i++) {
+					if (__cn.lineIsPlain(tokens[i].raw, tokens[i].segs.length)) n++;
+				}
+				return n;
+			}, [tokens, renderedCount]);
 
 			const symNodes = [];
 			// 三态：大纲本身为空 / 有符号但被筛选挡掉 / 符号全在渲染窗口外。
@@ -2180,6 +2212,10 @@ window.__ModuleLoader__.load({
 					// 覆盖范围，不再重复刷两条。
 					lineCapped === true && truncated !== true
 						? jsx("div", { className: "cn-warn", children: t("lineCapped").replace("{n}", String(renderedCount)).replace("{total}", String(contentLineCount)) }, "linecapped")
+						: null,
+					// 有超长行被降级为纯文本：说明原因，避免被当成高亮/渲染 bug。
+					plainLineCount > 0
+						? jsx("div", { className: "cn-warn", role: "status", children: t("linePlain").replace("{n}", String(plainLineCount)) }, "plainline")
 						: null,
 					// 窗口外的行跳转：说清楚没跳，不闪错误的行、也不消费这一跳。
 					lineNotice !== null

@@ -35,6 +35,31 @@ export function inRenderWindow(line, renderedCount) {
 }
 
 /**
+ * 单行「逐 token 高亮」的保护上限。
+ *
+ * 一行里塞进上万个 `<span>` 会让 Chromium 的布局/绘制卡死（实测：928 KB 单行 JSON
+ * → 54,508 个 span 在同一行，隔离 Chromium 里首帧永不出现、mousemove 300 s 不返回；
+ * 同一内容按一个文本节点渲染则 1.1 s 完成、hover 流畅）。超过任一上限的行改为
+ * **纯文本渲染**：仍显示完整内容、可选中、可搜索跳转（行闪烁/当前匹配列），只是
+ * 该行不做逐 token 着色 —— 用一次高亮换整页可用性。
+ */
+export const PLAIN_LINE_MAX_CHARS = 8000;
+
+/** 单行 token 段数上限（超长行往往同时命中字符数与段数，二者取「或」）。 */
+export const PLAIN_LINE_MAX_SEGS = 500;
+
+/**
+ * 该行是否应关闭逐 token 高亮、按纯文本渲染。
+ * @param {unknown} raw 该行原始文本
+ * @param {unknown} segCount 该行 token 段数
+ * @returns {boolean}
+ */
+export function lineIsPlain(raw, segCount) {
+	if (typeof raw === "string" && raw.length > PLAIN_LINE_MAX_CHARS) return true;
+	return typeof segCount === "number" && Number.isFinite(segCount) && segCount > PLAIN_LINE_MAX_SEGS;
+}
+
+/**
  * 把「带 1 基行号的对象」裁到渲染窗口内。
  * 搜索匹配与大纲符号都走这一个函数，二者的可跳转性与 DOM 行集合就不会漂移。
  * @template {{line:number}} T

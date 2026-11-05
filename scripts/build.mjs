@@ -41,7 +41,7 @@ export const EXPORTS = [
   "findMatches", "spansOfLine", "MAX_MATCHES",
   "SELECTION_LIMIT", "selectionHeader", "selectionWhere", "selectionPayload", "buildSelectionInsert",
   "CHIP_PLACEHOLDER", "detectTextOf", "needsLeadingSpace", "hasQuoteMarkers",
-  "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow",
+  "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow", "lineIsPlain",
   "clipToRenderWindow", "clipZeroBasedToRenderWindow",
   "themeIsDark", "lineWindowState", "matchWindowState", "symbolsEmptyKind"
 ];

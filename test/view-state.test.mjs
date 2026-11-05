@@ -16,7 +16,7 @@ import {
 	matchWindowState,
 	symbolsEmptyKind
 } from "../src/view-state.js";
-import { clipToRenderWindow } from "../src/render-window.js";
+import { clipToRenderWindow, lineIsPlain, PLAIN_LINE_MAX_CHARS, PLAIN_LINE_MAX_SEGS } from "../src/render-window.js";
 
 // ---------- themeIsDark ----------
 
@@ -219,4 +219,31 @@ test("symbols empty kind: the client's clipped list length distinguishes window 
 	const mixed = [...list, { kind: "class", name: "early", line: 3 }];
 	assert.equal(symbolsEmptyKind(true, 0, mixed.length), "filtered");
 	assert.equal(symbolsEmptyKind(true, 1, mixed.length), "ok");
+});
+
+// ---------- lineIsPlain（超长行关闭逐 token 高亮） ----------
+
+test("lineIsPlain: long lines / too many segments fall back to plain text", () => {
+	// 正常行：字符数与段数都远低于上限
+	assert.equal(lineIsPlain("const x = 1;", 5), false);
+	assert.equal(lineIsPlain("", 0), false);
+	// 恰好在上限上仍然高亮，超过一格才降级
+	assert.equal(lineIsPlain("x".repeat(PLAIN_LINE_MAX_CHARS), 1), false);
+	assert.equal(lineIsPlain("x".repeat(PLAIN_LINE_MAX_CHARS + 1), 1), true);
+	assert.equal(lineIsPlain("x", PLAIN_LINE_MAX_SEGS), false);
+	assert.equal(lineIsPlain("x", PLAIN_LINE_MAX_SEGS + 1), true);
+});
+
+test("lineIsPlain: the real 928KB one-line JSON is plain (54k spans would freeze Chromium)", () => {
+	// 实测：500,000 字符 / 54,508 个 token 段被渲染成同一行时，Chromium 首帧都不出现、
+	// mousemove 300s 不返回；改成纯文本后 1.1s 内完成且 hover 流畅。
+	assert.equal(lineIsPlain("y".repeat(500000), 54508), true);
+	// 超长但只有一段（例如被外部工具压成一行且无 token）也只按字符数判定
+	assert.equal(lineIsPlain("z".repeat(500000), 1), true);
+	// 短行即使 token 再多也不会误伤（例如 400 段）
+	assert.equal(lineIsPlain("a".repeat(100), 400), false);
+	// 非法输入不抛、不误判
+	assert.equal(lineIsPlain(undefined, undefined), false);
+	assert.equal(lineIsPlain(null, 10), false);
+	assert.equal(lineIsPlain("ok", NaN), false);
 });
