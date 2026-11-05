@@ -22,15 +22,28 @@ import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+/**
+ * 以 UTF-8 读取并**统一为 LF**。产物必须逐字节可复现：Windows 的
+ * `core.autocrlf=true` 会把检出的 src/模板变成 CRLF，而 `stripModule` 里
+ * 折叠空行的正则是按 LF 写的；不归一化时，同一份源码在 Windows 上会多出
+ * 两个空行，ubuntu CI 的“committed bundle is stale”检查就会误报失败。
+ * @param {string} file 绝对路径
+ * @returns {string}
+ */
+function readLf(file) {
+  return readFileSync(file, "utf8").replace(/\r\n?/g, "\n");
+}
 /** 拼接顺序即依赖顺序（被依赖者在前，共享作用域里声明在前才能被引用）。 */
-export const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "render-window"];
+export const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "draft-coords", "render-window", "view-state"];
 export const EXPORTS = [
   "langOf", "langLabel", "LANG_EXT", "LANG_META",
-  "tokenizeLines", "outlineOf", "kindGroup", "OUTLINE_MAX_SYMBOLS",
+  "tokenizeLines", "outlineOf", "outlineOfTokens", "kindGroup", "OUTLINE_MAX_SYMBOLS",
   "findMatches", "spansOfLine", "MAX_MATCHES",
-  "SELECTION_LIMIT", "selectionHeader", "buildSelectionInsert",
+  "SELECTION_LIMIT", "selectionHeader", "selectionWhere", "selectionPayload", "buildSelectionInsert",
+  "CHIP_PLACEHOLDER", "detectTextOf", "needsLeadingSpace", "hasQuoteMarkers",
   "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow",
-  "clipToRenderWindow", "clipZeroBasedToRenderWindow"
+  "clipToRenderWindow", "clipZeroBasedToRenderWindow",
+  "themeIsDark", "lineWindowState", "matchWindowState", "symbolsEmptyKind"
 ];
 
 /** 顶层声明名（含被 export 修饰的），用于重名与导出面校验。 */
@@ -93,7 +106,7 @@ export function buildBundle(options = {}) {
   const modules = options.modules ?? MODULES;
   const exportsList = options.exportsList ?? EXPORTS;
 
-  const pkgRaw = readFileSync(join(root, "package.json"), "utf8");
+  const pkgRaw = readLf(join(root, "package.json"));
   // 客户端 bundle 的注册 id 必须等于包名（client-modules 以包名作为 module
   // table key），所以从 package.json 注入而不是在模板里写死，避免改名后漂移。
   const pkgName = JSON.parse(pkgRaw).name;
@@ -112,7 +125,7 @@ export function buildBundle(options = {}) {
         `[build] MODULES requires every file to be committed (git add src/${name}.js and un-ignore it)`
       );
     }
-    const source = readFileSync(file, "utf8");
+    const source = readLf(file);
     sources.push({ module: name, source });
     const { code, leftovers } = stripModule(source);
     if (leftovers.length > 0) {
@@ -156,7 +169,7 @@ export function buildBundle(options = {}) {
   ].join("\n");
 
   const templatePath = join(root, "scripts", "client.template.js");
-  const template = readFileSync(templatePath, "utf8");
+  const template = readLf(templatePath);
   const marker = "// __CN_PURE__";
   if (!template.includes(marker)) throw new Error("[build] template marker not found: " + marker);
   const NAME_TOKEN = "__CN_PACKAGE_NAME__";
@@ -206,7 +219,8 @@ if (isCli) {
     const { code, pkgName, bytes } = buildBundle();
     mkdirSync(join(ROOT, "lib"), { recursive: true });
     writeFileSync(join(ROOT, "lib", "client.js"), code, "utf8");
-    console.log(`[build] lib/client.js written (${bytes} bytes, ${EXPORTS.length} exports, id "${pkgName}").`);
+    // bytes 是 UTF-16 码元数，不是磁盘字节数（中文注释会让二者明显不同）；如实叫 chars。
+    console.log(`[build] lib/client.js written (${bytes} chars, ${EXPORTS.length} exports, id "${pkgName}").`);
   } catch (error) {
     const text = String(error && error.message ? error.message : error);
     for (const line of text.split("\n")) console.error(line.startsWith("[build]") ? line : "[build] " + line);

@@ -9,6 +9,10 @@
  *  - 路径相对会话 cwd（与资源管理器的 @ 按钮同一投影），cwd 未知时用绝对路径；
  *  - 行号：单行写 `path:12`，多行写 `path:12-15`，行号不可得时只写路径。
  *
+ * 除围栏块本身，这里还给出草稿里那枚引用 chip 的两半：`where` 是可见标签
+ * （`文件名 L12-15`），`header` 是剪贴板 / 持久化投影（`相对路径:12-15`）。
+ * 发送时 codec 展开回 `text`，与 better-sidebar 的 quote chip 同形。
+ *
  * 共享作用域约定见 lang-registry.js 文件头。
  */
 
@@ -48,7 +52,40 @@ export function selectionHeader(path, cwd, lines) {
 }
 
 /**
- * 一次选区的完整插入文本。
+ * 引用 chip 的显示文字：`文件名 L起[-止]`（与 dsh-better-sidebar 的
+ * `引用 {where}` 同一身份；行号不可得时只写文件名）。
+ * @param {string} path 文件绝对路径
+ * @param {{start:number, end:number}|undefined} lines 1 起闭区间
+ * @returns {string}
+ */
+export function selectionWhere(path, lines) {
+  const parts = path.replace(/\\/g, "/").split("/");
+  const file = parts.length > 0 && parts[parts.length - 1] !== "" ? parts[parts.length - 1] : path;
+  if (lines === undefined || lines === null) return file;
+  if (lines.end > lines.start) return file + " L" + lines.start + "-" + lines.end;
+  return file + " L" + lines.start;
+}
+
+/**
+ * 一次选区的结构化载荷。
+ *  - `header`：围栏信息行 / chip 的剪贴板投影（`相对路径:起止行`）；
+ *  - `where`：chip 的显示文字（`文件名 L起止`）；
+ *  - `text`：模型最终收到的文本（围栏块；超过上限只留 header）。
+ * @param {string} path 文件绝对路径
+ * @param {string|undefined} cwd 会话工作目录
+ * @param {{start:number, end:number}|undefined} lines 1 起闭区间
+ * @param {string} selected 选中文本
+ * @returns {{header:string, where:string, text:string}}
+ */
+export function selectionPayload(path, cwd, lines, selected) {
+  const header = selectionHeader(path, cwd, lines);
+  const where = selectionWhere(path, lines);
+  if (selected.length > SELECTION_LIMIT) return { header, where, text: header };
+  return { header, where, text: "```" + header + "\n" + selected + "\n```" };
+}
+
+/**
+ * 一次选区的完整插入文本（纯文本回退路径的载荷）。
  * @param {string} path 文件绝对路径
  * @param {string|undefined} cwd 会话工作目录
  * @param {{start:number, end:number}|undefined} lines 1 起闭区间
@@ -56,7 +93,5 @@ export function selectionHeader(path, cwd, lines) {
  * @returns {string}
  */
 export function buildSelectionInsert(path, cwd, lines, selected) {
-  const header = selectionHeader(path, cwd, lines);
-  if (selected.length > SELECTION_LIMIT) return header;
-  return "```" + header + "\n" + selected + "\n```";
+  return selectionPayload(path, cwd, lines, selected).text;
 }

@@ -292,9 +292,141 @@ function stripYamlNodeProps(valueText) {
 }
 
 /**
+ * 读一个 YAML flow 标量：带引号的整段（含引号），或到 `,` `}` `]` `{` `[`
+ * 或「后接分隔符的 `:`」为止的纯量。不跨行；引号在行尾仍未闭合时返回 null
+ * （调用方据此放弃整次 flow 扫描，退回逐行解析）。
+ * @returns {{text:string, line:number, col:number}|null}
+ */
+function readYamlFlowToken(tokens, line, col) {
+  const text = tokens[line].raw;
+  if (col >= text.length) return { text: "", line, col };
+  const first = text[col];
+  if (first === '"' || first === "'") {
+    for (let i = col + 1; i < text.length; i++) {
+      const ch = text[i];
+      if (first === '"' && ch === "\\") { i++; continue; }
+      if (ch === first) return { text: text.slice(col, i + 1), line, col: i + 1 };
+    }
+    return null;
+  }
+  let i = col;
+  for (; i < text.length; i++) {
+    const ch = text[i];
+    if (ch === "," || ch === "}" || ch === "]" || ch === "{" || ch === "[") break;
+    if (ch === ":") {
+      const next = text[i + 1];
+      if (next === undefined || next === " " || next === "\t" || next === "," ||
+          next === "}" || next === "]" || next === "[") break;
+    }
+  }
+  return { text: text.slice(col, i), line, col: i };
+}
+
+/**
+ * flow 键名：去掉包裹引号；双引号键按 JSON 风格解码转义（`"a\nb"` 显示为两行，
+ * 与 JSON 侧的 `unescapeJsonKey` 同口径），单引号 / 裸键只去引号。
+ * @param {string} text 原始键文本（可能带引号）
+ * @returns {string}
+ */
+function unquoteFlowKey(text) {
+  const t = text.trim();
+  if (t.length >= 2 && t[0] === '"' && t[t.length - 1] === '"') return unescapeJsonKey(t.slice(1, -1));
+  return unquoteKey(t);
+}
+
+/**
+ * 扫描一个 YAML flow 节点（`{…}` / `[…]`，可跨行），把其中的映射键收集出来。
+ *
+ * 只在「块映射的值以 `{` / `[` 开头」或「整行（列表项）本身就是 flow 节点」时调用。
+ * 支持嵌套容器、`{a: 1, b: 2}`、`[a: 1, b: 2]`（单键映射元素）、引号键与行内注释。
+ * 解析不完整（引号跨行未闭合 / 括号没配平）时返回 `closed: false`，调用方丢弃
+ * 已收集的符号并退回原来的逐行行为 —— 保证畸形输入不会吞掉后续内容。
+ *
+ * @param {Array<{raw:string}>} tokens 每行 token
+ * @param {number} lineCount 行数
+ * @param {number} startLine 起始行（0 基）
+ * @param {number} startCol 起始列（指向 `{` / `[`）
+ * @param {string|undefined} owner 该 flow 节点自身的名字（根节点 / 列表项为 undefined）
+ * @returns {{closed:boolean, endLine:number, syms:Array}} `line` 均为 1 基
+ */
+function scanYamlFlow(tokens, lineCount, startLine, startCol, owner) {
+  const syms = [];
+  const stack = [];        // { owner, open } —— flow 容器上下文
+  const currentOwner = () => (stack.length > 0 ? stack[stack.length - 1].owner : owner);
+  const failed = () => ({ closed: false, endLine: startLine, syms: [] });
+  let line = startLine;
+  let col = startCol;
+  let guard = 0;
+  while (line < lineCount) {
+    if (guard++ > 1000000) return failed();   // 防御：异常输入不至于卡死
+    const text = tokens[line].raw;
+    if (col >= text.length) { line++; col = 0; continue; }
+    const ch = text[col];
+    if (ch === "#" && (col === 0 || /\s/.test(text[col - 1]))) { line++; col = 0; continue; }
+    if (ch === " " || ch === "\t" || ch === ",") { col++; continue; }
+    if (ch === "{" || ch === "[") {
+      stack.push({ owner: currentOwner() });
+      col++;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      if (stack.length === 0) return failed();
+      stack.pop();
+      col++;
+      if (stack.length === 0) return { closed: true, endLine: line, syms };
+      continue;
+    }
+    // 一个 entry：`键: 值` 或裸值（如 `[1, 2]` 里的 1）
+    const entryLine = line;
+    const token = readYamlFlowToken(tokens, line, col);
+    if (token === null) return failed();
+    if (token.line === line && token.col <= col) { col++; continue; }   // 理论上的零进展保护
+    line = token.line;
+    col = token.col;
+    const entryText = tokens[line].raw;
+    let probe = col;
+    while (probe < entryText.length && (entryText[probe] === " " || entryText[probe] === "\t")) probe++;
+    if (entryText[probe] !== ":") continue;      // 裸值：已消费，交给后续 `,` / `}` 处理
+    // 跳过 `:` 之后的空白（允许换行），定位值的首字符
+    let vl = line;
+    let vc = probe + 1;
+    for (;;) {
+      if (vl >= lineCount) return failed();
+      const vt = tokens[vl].raw;
+      if (vc >= vt.length) { vl++; vc = 0; continue; }
+      if (vt[vc] === " " || vt[vc] === "\t") { vc++; continue; }
+      break;
+    }
+    const valueCh = tokens[vl].raw[vc];
+    const name = unquoteFlowKey(token.text);
+    if (name.length === 0 || name.length > CFG_NAME_MAX || name.startsWith("#")) {
+      line = vl;
+      col = vc;
+      continue;
+    }
+    const flowOwner = currentOwner();
+    const isContainer = valueCh === "{" || valueCh === "[";
+    const sym = { kind: isContainer ? "section" : "key", name, line: entryLine + 1 };
+    if (flowOwner !== undefined) sym.container = flowOwner;
+    syms.push(sym);
+    if (isContainer) {
+      stack.push({ owner: name });
+      line = vl;
+      col = vc + 1;
+      continue;
+    }
+    line = vl;
+    col = vc;
+  }
+  return failed();
+}
+
+/**
  * YAML：缩进驱动的映射键；值为空（后随子块）的键视为段。
  * 只认「后接空白 / 行尾」的冒号，故 `url: http://x` 不会把 `http` 当成键。
  * `|` / `>` 块标量的正文按缩进跳过，故正文里的 `fake: value` 不会成为键。
+ * `---` / `...` 是文档分隔符：新文档从零开始（段栈清空），第二文档的键不会挂到
+ * 第一文档的段上。flow 节点（`{…}` / `[…]`，可跨行）里的键也会入大纲。
  */
 function extractYaml(tokens, lineCount) {
   const out = [];
@@ -310,12 +442,40 @@ function extractYaml(tokens, lineCount) {
       blockIndent = -1;                      // 缩进回退 → 块结束，本行照常解析
     }
     if (trimmed.length === 0 || trimmed.startsWith("#")) continue;
-    if (trimmed.startsWith("---") || trimmed.startsWith("...")) continue;   // 文档分隔符
+    // 文档分隔符：`---` 开始新文档、`...` 结束当前文档 —— 段栈与块标量状态都要重置
+    if (/^(?:---|\.\.\.)(?:\s|$)/.test(trimmed)) {
+      stack.length = 0;
+      blockIndent = -1;
+      continue;
+    }
     const indent = indentOf(raw);
     let body = raw.slice(indent);
-    const listItem = /^-\s+/.test(body);
-    if (listItem) body = body.replace(/^-\s+/, "");
-    if (body.startsWith("#")) continue;
+    let keyIndent = indent;
+    const listLead = /^-\s+/.exec(body);
+    const listItem = listLead !== null;
+    if (listItem) {
+      body = body.slice(listLead[0].length);
+      // 序列与父键同缩进是合法的（`key:\n- item`）：用「键真正开始的列」参与
+      // 容器栈比较，否则父键会在同缩进的列表项处被误弹出。
+      keyIndent = indent + listLead[0].length;
+    }
+    if (body.length === 0 || body.startsWith("#")) continue;
+    const bodyCol = raw.length - body.length;
+    // 整行 / 列表项本身就是一个 flow 节点：`{a: 1}` / `- {a: 1}` / 根 flow 映射
+    if (body[0] === "{" || body[0] === "[") {
+      // 先在不动块段栈的前提下算出 flow 子键的归属：解析成功才真正弹栈
+      let keep = stack.length - 1;
+      while (keep >= 0 && stack[keep].indent >= keyIndent) keep--;
+      const container = keep >= 0 ? stack[keep].name : undefined;
+      const flow = scanYamlFlow(tokens, lineCount, i, bodyCol, container);
+      if (flow.closed) {
+        stack.length = keep + 1;
+        for (const s of flow.syms) out.push(s);
+        i = flow.endLine;
+        continue;
+      }
+      // 解析不完整：退回逐行逻辑（与修复前一致）
+    }
     // 第一个「后接空白或行尾」且不在引号里的冒号才是映射分隔符
     const ci = yamlColonOf(body);
     if (ci <= 0) {
@@ -330,16 +490,53 @@ function extractYaml(tokens, lineCount) {
     // `defaults: &defaults` / `mapping: !!map` 的节点属性只是修饰紧随其后的节点，
     // 剥掉后若已无剩余内容，说明该键的值就是后随的子块 → 仍是段。
     const valueText = stripYamlNodeProps(stripTrailingComment(body.slice(ci + 1), "#").trim());
-    while (stack.length > 0 && stack[stack.length - 1].indent >= indent) stack.pop();
+    while (stack.length > 0 && stack[stack.length - 1].indent >= keyIndent) stack.pop();
     const container = stack.length > 0 ? stack[stack.length - 1].name : undefined;
     const sym = { kind: valueText.length === 0 ? "section" : "key", name, line: i + 1 };
     if (container !== undefined) sym.container = container;
     out.push(sym);
-    if (valueText.length === 0) stack.push({ indent, name });
+    // 值是 flow 节点（`key: {…}` / `key: […]`）：把子键也列出来，多行 flow 的
+    // 后续行由扫描器整段吃掉，不会再被当成顶层块键。
+    if (valueText.length > 0 && (valueText[0] === "{" || valueText[0] === "[")) {
+      const flowStart = body.indexOf(valueText[0], ci + 1);
+      if (flowStart >= 0) {
+        const flow = scanYamlFlow(tokens, lineCount, i, bodyCol + flowStart, name);
+        if (flow.closed) {
+          for (const s of flow.syms) out.push(s);
+          i = flow.endLine;
+          continue;
+        }
+      }
+    }
+    if (valueText.length === 0) stack.push({ indent: keyIndent, name });
     // `|` / `>`（可带 `-` `+` 与缩进指示数字）→ 后续更深缩进的行是字面正文
     if (/^[|>][-+\d]*$/.test(valueText)) blockIndent = indent;
   }
   return out;
+}
+
+/**
+ * 取 TOML 段头（`[a]` / `[[a.b]]`）里的段路径；不是段头 / 段头没闭合返回 null。
+ * 名字可以带引号键，所以不能简单按第一个 `]` 截断 —— `[a."b]c"]` 的 `]` 在引号里。
+ * @param {string} trimmed 去掉行首空白后的整行
+ * @returns {string|null}
+ */
+function tomlSectionNameOf(trimmed) {
+  let open = 0;
+  while (open < trimmed.length && trimmed[open] === "[") open++;
+  if (open === 0) return null;
+  let quote = "";
+  for (let i = open; i < trimmed.length; i++) {
+    const ch = trimmed[i];
+    if (quote !== "") {
+      if (quote === '"' && ch === "\\") { i++; continue; }
+      if (ch === quote) quote = "";
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; continue; }
+    if (ch === "]") return trimmed.slice(open, i).trim();
+  }
+  return null;
 }
 
 /**
@@ -363,9 +560,9 @@ function extractToml(tokens, lineCount) {
     }
     // `"""` / `'''` 多行字符串的正文与收尾行整行都是字符串内容，不是键
     if (tokens[i].str === true) continue;
-    const ms = /^\[+([^\]]+)\]+/.exec(trimmed);
-    if (ms !== null) {
-      const name = ms[1].trim();
+    const sectionName = trimmed[0] === "[" ? tomlSectionNameOf(trimmed) : null;
+    if (sectionName !== null) {
+      const name = sectionName;
       if (name.length === 0 || name.length > CFG_NAME_MAX) continue;
       const sym = { kind: "section", name, line: i + 1 };
       const parent = parentTableOf(name, seen);
@@ -423,6 +620,33 @@ function keyEndOf(body, sep, opts) {
 }
 
 /**
+ * 值以引号开头、且在同一行内没有闭合时返回那个引号字符；否则返回 ""。
+ * dotenv 的引号值可以跨行（`KEY="line1\nline2"`），续行整行都属于值。
+ * @param {string} valueText 已去掉首尾空白的值文本
+ * @returns {string} `"` / `'` / ""
+ */
+function openQuoteOf(valueText) {
+  const quote = valueText[0];
+  if (quote !== '"' && quote !== "'") return "";
+  for (let i = 1; i < valueText.length; i++) {
+    const ch = valueText[i];
+    if (quote === '"' && ch === "\\") { i++; continue; }
+    if (ch === quote) return "";
+  }
+  return quote;
+}
+
+/** 引号值续行：本行是否把它闭合（未闭合返回原引号字符，闭合返回 ""）。 */
+function continueQuoteOn(line, quote) {
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (quote === '"' && ch === "\\") { i++; continue; }
+    if (ch === quote) return "";
+  }
+  return quote;
+}
+
+/**
  * 行式键值配置（INI / Java properties / dotenv）。
  * @param {object} opts
  * @param {string[]} opts.comment 注释标记
@@ -433,14 +657,21 @@ function keyEndOf(body, sep, opts) {
  * @param {boolean} opts.exportPrefix 是否剥离行首 `export `
  * @param {boolean} [opts.spaceSep] 空白是否也算分隔符（Java properties）
  * @param {boolean} [opts.escape] 反斜杠是否为转义符（Java properties）
+ * @param {boolean} [opts.quoteContinuation] 引号值是否可跨行（dotenv）
  */
 function extractKeyValue(tokens, lineCount, opts) {
   const out = [];
   let section = null;
   let continued = false;
+  let openQuote = "";   // 非空表示当前行仍在上一个跨行引号值内部
   for (let i = 0; i < lineCount; i++) {
     const raw = tokens[i].raw;
     const trimmed = raw.trim();
+    // 跨行引号值内部：整行都是值，既不是键、也不参与段头 / 注释判定
+    if (openQuote !== "") {
+      openQuote = continueQuoteOn(raw, openQuote);
+      continue;
+    }
     // 续行归属上一键；续行自身行尾也可能再次续行（同样只看奇数个反斜杠）
     if (continued) { continued = opts.continuation && endsWithContinuation(raw); continue; }
     if (trimmed.length === 0 || isCommentLine(raw, opts.comment)) continue;
@@ -458,6 +689,7 @@ function extractKeyValue(tokens, lineCount, opts) {
     let body = trimmed;
     if (opts.exportPrefix && /^export\s+/.test(body)) body = body.replace(/^export\s+/, "");
     let name = null;
+    let sepCut = -1;
     if (opts.escape === true && opts.spaceSep === true) {
       // properties：与高亮共用 properties-key.js 的截断规则
       // （含转义裸键 `key\:part` 与行尾续行反斜杠 `a\`），两边不可能漂移。
@@ -465,7 +697,14 @@ function extractKeyValue(tokens, lineCount, opts) {
       if (keyText.length > 0) name = keyText;
     } else if (opts.sep !== null) {
       const cut = keyEndOf(body, opts.sep, opts);
-      if (cut > 0) name = body.slice(0, cut).trim();
+      if (cut > 0) {
+        name = body.slice(0, cut).trim();
+        sepCut = cut;
+      }
+    }
+    // dotenv：值以引号开头且本行没闭合 → 后续行都是这个值的内容（本行照常出键）
+    if (opts.quoteContinuation && sepCut >= 0) {
+      openQuote = openQuoteOf(body.slice(sepCut + 1).trim());
     }
     // 裸键行：INI 的 `key`
     if (name === null && opts.bare && /^[A-Za-z_][\w.-]*$/.test(body)) name = body;
@@ -510,6 +749,25 @@ function extractXml(tokens, lineCount) {
   }
   const out = [];
   const stack = [];          // 未闭合的元素名
+  // 名字 → 它在 stack 里的下标（升序）。闭合标签找匹配项从 O(depth) 降到 O(1)；
+  // 大量错配标签时旧实现是 O(n²)（500 KB 约 20 秒），这条路径必须保持近似线性。
+  const openPositions = new Map();
+  const positionsOf = (name) => {
+    let list = openPositions.get(name);
+    if (list === undefined) { list = []; openPositions.set(name, list); }
+    return list;
+  };
+  /** 弹出 stack[index..]（含 index），同步维护 openPositions。 */
+  const popTo = (index) => {
+    for (let k = stack.length - 1; k >= index; k--) {
+      const list = openPositions.get(stack[k]);
+      if (list !== undefined) {
+        list.pop();
+        if (list.length === 0) openPositions.delete(stack[k]);
+      }
+    }
+    stack.length = index;
+  };
   let mode = "text";         // text | tag | close | skip
   let buf = "";
   let element = null;
@@ -542,8 +800,8 @@ function extractXml(tokens, lineCount) {
     if (mode === "close") {
       if (isXmlNameChar(ch)) { buf += ch; ci++; continue; }
       if (buf.length > 0) {
-        const at = stack.lastIndexOf(buf);
-        if (at >= 0) stack.length = at;   // 连同匹配项一起弹出
+        const list = openPositions.get(buf);
+        if (list !== undefined && list.length > 0) popTo(list[list.length - 1]);   // 连同匹配项一起弹出
         buf = "";
         mode = "skip";                    // 名字读完，跳到 '>'（此处不会再有内部子集）
         continue;
@@ -577,7 +835,10 @@ function extractXml(tokens, lineCount) {
     }
     if (ch === "/") { selfClose = true; ci++; continue; }
     if (ch === ">") {
-      if (!selfClose) stack.push(element);
+      if (!selfClose && element !== null) {
+        stack.push(element);
+        positionsOf(element).push(stack.length - 1);
+      }
       element = null;
       selfClose = false;
       mode = "text";
@@ -611,7 +872,8 @@ export function outlineOfConfig(text, lang, tokens, lineCount) {
     return extractKeyValue(tokens, lineCount, { comment: ["#", "!"], sep: "=:", sections: false, bare: true, continuation: true, exportPrefix: false, spaceSep: true, escape: true });
   }
   if (lang === "dotenv") {
-    return extractKeyValue(tokens, lineCount, { comment: ["#"], sep: "=", sections: false, bare: false, continuation: false, exportPrefix: true });
+    // dotenv 的引号值允许跨行：`KEY="line1\nline2"` 的续行属于值，不能当新键。
+    return extractKeyValue(tokens, lineCount, { comment: ["#"], sep: "=", sections: false, bare: false, continuation: false, exportPrefix: true, quoteContinuation: true });
   }
   return [];
 }

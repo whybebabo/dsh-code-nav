@@ -10,14 +10,17 @@
 //
 // 本插件仓库与 better-sidebar fork 的属主都从 package.json 的 repository.url 派生，
 // 不再写死上游属主（写死会把 PR 里的插件地址指向上游仓库，而不是本 fork）。
+//
+// 幂等：重复执行时先按 head=`<owner>:<branch>` 查询 open PR，已存在就打印 URL 退出 0，
+// 不重复 POST；POST 返回 422 时给出可读提示（并发创建 / 分支无差异）。
 import { execFileSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { tmpdir } from "node:os";
 import { existsSync, mkdirSync } from "node:fs";
-import { readPkg, repoOf, readGithubToken } from "./release-config.mjs";
+import { pathToFileURL } from "node:url";
+import { readPkg, repoOf, readGithubToken, normalizeRemoteRepo, redactRemoteUrl } from "./release-config.mjs";
 
-const DRY = process.argv.slice(2).includes("--dry-run");
-
+/** 本仓库（派生自 package.json，用于 PR 正文里的插件地址）。 */
 const pkg = readPkg();
 const PLUGIN_REPO = repoOf(pkg);                                   // whybebabo/dsh-code-nav
 const OWNER = PLUGIN_REPO.split("/")[0];                           // whybebabo
@@ -28,173 +31,271 @@ const BRANCH = "feat/dsh-code-nav-catalog";
 const CLONE = process.env.DSH_BS_CLONE || join(tmpdir(), ".tmp-bs-clone");
 /** 脚本要提交的三个文件（也是 dry-run 要检查的改动）。 */
 const PATCH_FILES = ["src/client/plugins-viewers.ts", "src/client/locales.ts", "src/client/locales-ja.ts"];
-console.log("plugin repo:", PLUGIN_REPO, "| better-sidebar fork:", FORK, "| clone:", CLONE);
-console.log("mode:", DRY ? "DRY RUN（不 clone、不提交、不推送、不建 PR）" : "LIVE");
-
-if (DRY) {
-  // 只报本地能看到的状态；连 clone 都不做（dry-run 不该产生任何写入，包括首次克隆）。
-  console.log("upstream:", UPSTREAM, "| branch:", BRANCH);
-  console.log("files:", PATCH_FILES.join(", "));
-  console.log(existsSync(CLONE) ? "clone 目录已存在: " + CLONE : "clone 目录不存在（真跑时会自动克隆）");
-  console.log("[pr] dry run 计划校验通过，未做任何写入。");
-  process.exit(0);
-}
-
-let token;
-try {
-  token = readGithubToken();
-} catch (e) {
-  console.error("[pr] " + e.message);
-  process.exit(1);
-}
-
-const H = {
-  Authorization: "Bearer " + token,
-  Accept: "application/vnd.github+json",
-  "User-Agent": "dsh-pr",
-  "X-GitHub-Api-Version": "2022-11-28",
-};
-const gh = (path, init = {}) =>
-  fetch("https://api.github.com" + path, {
-    ...init,
-    headers: { ...H, ...(init.headers ?? {}) },
-  });
-function sh(cmd, args) {
-  console.log("$", cmd, args.join(" "));
-  return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe" });
-}
-
-// 1) 先做**纯本地**的前置校验与提交准备（不产生任何远端写入）
 const UPSTREAM_URL = "https://github.com/" + UPSTREAM + ".git";
 
-/** 执行并返回 stdout；失败返回 null（用于「只想知道成不成」的查询）。 */
-function gitQ(args) {
-  try { return sh("git", ["-C", CLONE, ...args]); }
-  catch { return null; }
-}
+/** CLI 主体；被 import 时不执行（供 test/release-hardening.test.mjs 用纯函数）。 */
+async function main() {
+  const argv = process.argv.slice(2);
+  const DRY = argv.includes("--dry-run");
 
-// 2) 确保 clone 目录存在且是有效仓库
-// 默认目录在系统临时目录，全新环境并不存在 —— 曾经直接 `git fetch` 会立刻失败。
-// 现在目录缺失时自动 clone 上游；已存在则校验它确实是 git 仓库（不能是随便一个同名目录）。
-if (!existsSync(CLONE)) {
-  console.log("clone 目录不存在，自动克隆上游：", UPSTREAM_URL, "->", CLONE);
-  mkdirSync(dirname(CLONE), { recursive: true });
-  sh("git", ["clone", UPSTREAM_URL, CLONE]);
-}
-if (gitQ(["rev-parse", "--is-inside-work-tree"]) === null) {
-  console.error("[pr] clone 目录不是有效的 git 仓库：" + CLONE);
-  console.error("[pr] 请删除该目录后重跑（脚本会自动 clone），或用 DSH_BS_CLONE 指向正确的 clone。");
-  console.error("[pr] 本次未做任何写入。");
-  process.exit(1);
-}
-const cloneOrigin = (gitQ(["remote", "get-url", "origin"]) || "").trim();
-if (cloneOrigin === "") {
-  console.error("[pr] clone 缺少 origin remote：" + CLONE);
-  console.error("[pr] 请设置：git -C \"" + CLONE + "\" remote add origin " + UPSTREAM_URL);
-  console.error("[pr] 本次未做任何写入。");
-  process.exit(1);
-}
+  console.log("plugin repo:", PLUGIN_REPO, "| better-sidebar fork:", FORK, "| clone:", CLONE);
+  console.log("mode:", DRY ? "DRY RUN（不 clone、不提交、不推送、不建 PR）" : "LIVE");
 
-// 完整历史 + 取回 origin/main
-// --unshallow 在**完整**仓库上是致命错误（exit 128），只在确实是浅克隆时才执行。
-if ((gitQ(["rev-parse", "--is-shallow-repository"]) || "").trim() === "true") {
-  sh("git", ["-C", CLONE, "fetch", "--unshallow", "origin"]);
-}
-sh("git", ["-C", CLONE, "fetch", "origin", "main"]);
+  if (DRY) {
+    // 只报本地能看到的状态；连 clone 都不做（dry-run 不该产生任何写入，包括首次克隆）。
+    console.log("upstream:", UPSTREAM, "| branch:", BRANCH);
+    console.log("files:", PATCH_FILES.join(", "));
+    console.log(existsSync(CLONE) ? "clone 目录已存在: " + CLONE : "clone 目录不存在（真跑时会自动克隆）");
+    console.log("[pr] dry run 计划校验通过，未做任何写入。");
+    return;
+  }
 
-// 切到 feat 分支（不销毁工作区改动）
-// 曾经是 checkout 失败后 `git reset --hard origin/main`：那会删掉 clone 里所有未提交修改，
-// 而 checkout 失败往往正是因为这些修改；且与下方「未提交修改随 checkout 保留」的注释自相矛盾。
-// 现在只做 checkout，失败就停下并报告，绝不 hard reset。
-const curBranch = (gitQ(["rev-parse", "--abbrev-ref", "HEAD"]) || "").trim();
-if (curBranch !== BRANCH) {
-  const hasLocal = gitQ(["rev-parse", "--verify", "--quiet", "refs/heads/" + BRANCH]) !== null;
-  const args = hasLocal ? ["checkout", BRANCH] : ["checkout", "-b", BRANCH, "origin/main"];
+  function sh(cmd, args) {
+    console.log("$", cmd, args.join(" "));
+    return execFileSync(cmd, args, { encoding: "utf8", stdio: "pipe" });
+  }
+
+  /** 执行并返回 stdout；失败返回 null（用于「只想知道成不成」的查询）。 */
+  function gitQ(args) {
+    try { return sh("git", ["-C", CLONE, ...args]); }
+    catch { return null; }
+  }
+
+  // 1) 先做**纯本地**的前置校验与提交准备（不产生任何远端写入）
+  // 2) 确保 clone 目录存在且是有效仓库
+  // 默认目录在系统临时目录，全新环境并不存在 —— 曾经直接 `git fetch` 会立刻失败。
+  // 现在目录缺失时自动 clone 上游；已存在则校验它确实是 git 仓库（不能是随便一个同名目录）。
+  if (!existsSync(CLONE)) {
+    console.log("clone 目录不存在，自动克隆上游：", UPSTREAM_URL, "->", CLONE);
+    mkdirSync(dirname(CLONE), { recursive: true });
+    sh("git", ["clone", UPSTREAM_URL, CLONE]);
+  }
+  if (gitQ(["rev-parse", "--is-inside-work-tree"]) === null) {
+    console.error("[pr] clone 目录不是有效的 git 仓库：" + CLONE);
+    console.error("[pr] 请删除该目录后重跑（脚本会自动 clone），或用 DSH_BS_CLONE 指向正确的 clone。");
+    console.error("[pr] 本次未做任何写入。");
+    process.exit(1);
+  }
+  const cloneOrigin = (gitQ(["remote", "get-url", "origin"]) || "").trim();
+  if (cloneOrigin === "") {
+    console.error("[pr] clone 缺少 origin remote：" + CLONE);
+    console.error("[pr] 请设置：git -C \"" + CLONE + "\" remote add origin " + UPSTREAM_URL);
+    console.error("[pr] 本次未做任何写入。");
+    process.exit(1);
+  }
+  // clone 的来源必须是 upstream —— 否则可能在无关仓库上提交、再推到本插件 fork，
+  // 让 PR 带上完全不属于 better-sidebar 的内容。规范化后比较（HTTPS/SSH/git+ 等价）。
+  if (!cloneOriginMatchesUpstream(cloneOrigin)) {
+    // remote URL 的 userinfo 里可能内嵌 PAT（CI / 无人值守场景的
+    // `https://x-access-token:<PAT>@github.com/...`），原样打印会进终端历史 / CI 日志。
+    console.error("[pr] clone origin 指向 " + redactRemoteUrl(cloneOrigin) + "，不是上游 " + UPSTREAM_URL + "。");
+    console.error("[pr] 拒绝在该 clone 上提交/推送；请用 DSH_BS_CLONE 指向上游 clone，或删除该目录让脚本重新 clone。");
+    console.error("[pr] 本次未提交、未推送。");
+    process.exit(1);
+  }
+
+  // 完整历史 + 取回 origin/main
+  // --unshallow 在**完整**仓库上是致命错误（exit 128），只在确实是浅克隆时才执行。
+  if ((gitQ(["rev-parse", "--is-shallow-repository"]) || "").trim() === "true") {
+    sh("git", ["-C", CLONE, "fetch", "--unshallow", "origin"]);
+  }
+  sh("git", ["-C", CLONE, "fetch", "origin", "main"]);
+
+  // 切到 feat 分支（不销毁工作区改动）
+  // 曾经是 checkout 失败后 `git reset --hard origin/main`：那会删掉 clone 里所有未提交修改，
+  // 而 checkout 失败往往正是因为这些修改；且与下方「未提交修改随 checkout 保留」的注释自相矛盾。
+  // 现在只做 checkout，失败就停下并报告，绝不 hard reset。
+  const curBranch = (gitQ(["rev-parse", "--abbrev-ref", "HEAD"]) || "").trim();
+  if (curBranch !== BRANCH) {
+    const hasLocal = gitQ(["rev-parse", "--verify", "--quiet", "refs/heads/" + BRANCH]) !== null;
+    const args = hasLocal ? ["checkout", BRANCH] : ["checkout", "-b", BRANCH, "origin/main"];
+    try {
+      sh("git", ["-C", CLONE, ...args]);
+    } catch {
+      console.error("[pr] 切换分支失败：git " + args.join(" ") + "（目录 " + CLONE + "）");
+      console.error("[pr] 拒绝执行 `git reset --hard`：工作区里的未提交改动正是本次要提交的内容，");
+      console.error("[pr] 强重置会把它们删掉。当前工作区状态：");
+      const st = (gitQ(["status", "--short"]) || "").trim();
+      console.error(st === "" ? "  (干净)" : st.split("\n").map((l) => "  " + l).join("\n"));
+      console.error("[pr] 请先自行处理（例如 git -C \"" + CLONE + "\" stash）后重跑。本次未提交、未推送。");
+      process.exit(1);
+    }
+  }
+
+  // 待提交的改动应已在工作区（未提交修改随 checkout 保留）。
+  // 用 `status --porcelain` 而非 `diff HEAD`，这样**新增**文件（untracked）也算数。
+  // 若工作区干净但分支已有相对 origin/main 的提交，说明上次已提交成功 —— 直接复用，
+  // 使重跑幂等。两者都没有才停下并给出可操作指引。
+  const dirty = new Set(
+    (gitQ(["status", "--porcelain"]) || "")
+      .split("\n").map((l) => l.slice(3).trim().replace(/^"|"$/g, "")).filter(Boolean)
+  );
+  const dirtyPatched = PATCH_FILES.filter((f) => dirty.has(f));
+  const aheadCommits = (gitQ(["rev-list", "--count", "origin/main..HEAD"]) || "0").trim();
+
+  if (dirtyPatched.length > 0) {
+    sh("git", ["-C", CLONE, "add", ...PATCH_FILES]);
+    sh("git", ["-C", CLONE, "commit", "-m", "Add dsh-code-nav to the file-viewer plugin catalog"]);
+  } else if (aheadCommits !== "0") {
+    console.log("工作区干净，分支 " + BRANCH + " 已有 " + aheadCommits + " 个提交，复用（跳过 commit）");
+  } else {
+    console.error("[pr] clone 工作区里没有待提交的改动，且 " + BRANCH + " 相对 origin/main 没有提交。");
+    console.error("[pr] 期望改动的文件：" + PATCH_FILES.join(", "));
+    console.error("[pr] clone 目录：" + CLONE);
+    console.error("[pr] 本脚本只负责提交并推送**已准备好**的改动，不会自动改写上游源码。");
+    console.error("[pr] 请在该 clone 中编辑下列文件后重跑：");
+    console.error("[pr]   " + PATCH_FILES.join("\n[pr]   "));
+    console.error("[pr] 本次未提交、未推送。");
+    process.exit(1);
+  }
+
+  // 3) 本地校验全部通过后才取 token（凭据助手在 Windows 上可能弹窗，不应该因为
+  //    「clone 目录明显不对」这种纯本地问题就去打扰用户 / CI）。
+  let token;
   try {
-    sh("git", ["-C", CLONE, ...args]);
-  } catch {
-    console.error("[pr] 切换分支失败：git " + args.join(" ") + "（目录 " + CLONE + "）");
-    console.error("[pr] 拒绝执行 `git reset --hard`：工作区里的未提交改动正是本次要提交的内容，");
-    console.error("[pr] 强重置会把它们删掉。当前工作区状态：");
-    const st = (gitQ(["status", "--short"]) || "").trim();
-    console.error(st === "" ? "  (干净)" : st.split("\n").map((l) => "  " + l).join("\n"));
-    console.error("[pr] 请先自行处理（例如 git -C \"" + CLONE + "\" stash）后重跑。本次未提交、未推送。");
+    token = readGithubToken();
+  } catch (e) {
+    console.error("[pr] " + e.message);
+    process.exit(1);
+  }
+
+  const H = {
+    Authorization: "Bearer " + token,
+    Accept: "application/vnd.github+json",
+    "User-Agent": "dsh-pr",
+    "X-GitHub-Api-Version": "2022-11-28",
+  };
+  const gh = (path, init = {}) =>
+    fetch("https://api.github.com" + path, {
+      ...init,
+      headers: { ...H, ...(init.headers ?? {}) },
+    });
+
+  // 4) 幂等检查：同 head 的 open PR 已存在就复用，绝不重复 POST。
+  const head = FORK.split("/")[0] + ":" + BRANCH;
+  const existingRes = await gh(
+    `/repos/${UPSTREAM}/pulls?state=open&head=${encodeURIComponent(head)}&per_page=100`
+  );
+  if (!existingRes.ok) {
+    console.error("[pr] 查询已有 PR 失败（HTTP " + existingRes.status + "）；未 fork、未推送、未创建 PR。");
+    process.exit(1);
+  }
+  const existingPr = decidePrAction(await existingRes.json());
+  if (existingPr.action === "reuse") {
+    console.log("PR EXISTS:", existingPr.url, "（head " + head + "，跳过 fork/push/创建）");
+    console.log("DONE (no changes)");
+    return;
+  }
+
+  // 5) fork（已存在则忽略 422）—— 本地校验通过后才动远端
+  {
+    const r = await gh(`/repos/${UPSTREAM}/forks`, { method: "POST" });
+    const d = await r.json();
+    if (r.ok) console.log("FORKED:", d.full_name);
+    else if (r.status === 422) console.log("FORK EXISTS (or already forked)");
+    else { console.error("fork failed", r.status, d.message || ""); process.exit(1); }
+  }
+
+  // 6) push 到 fork
+  const forkUrl = "https://github.com/" + FORK + ".git";
+  try { sh("git", ["-C", CLONE, "remote", "add", "fork", forkUrl]); }
+  catch { sh("git", ["-C", CLONE, "remote", "set-url", "fork", forkUrl]); }
+  sh("git", ["-C", CLONE, "push", "-u", "fork", BRANCH]);
+
+  // 7) PR
+  const body = [
+    "Adds **dsh-code-nav** to the built-in file-viewer plugin catalog (the \"add preview plugin\" modal).",
+    "",
+    "### Entry",
+    "- **id**: `dsh-code-nav` — code preview navigator for the better-sidebar editor",
+    "- **url**: https://github.com/" + PLUGIN_REPO,
+    "- **description** (zh/en/ja): per-language syntax highlighting + symbol outline (class/method/variable filter & jump) + in-file search; takes over code file preview",
+    "- **install**: `dsh plugin --profile web add https://github.com/" + PLUGIN_REPO + ".git`",
+    "",
+    "### Files",
+    "- `src/client/plugins-viewers.ts` — new catalog entry (alphabetical order)",
+    "- `src/client/locales.ts` — `pluginCodeNavDesc` in zh + en (key-set kept equal)",
+    "- `src/client/locales-ja.ts` — `pluginCodeNavDesc` in ja",
+    "",
+    "### Notes",
+    "- The repo is tagged `dsh-better-sidebar` (GitHub topic) for ecosystem discoverability",
+    "- `tests/plugin-list.spec.ts` shape rules are satisfied: unique id, GitHub URL, non-empty localized description, install starts with `cd ~/.dsh` and contains `dsh plugin`",
+  ].join("\n");
+
+  const pr = await gh(`/repos/${UPSTREAM}/pulls`, {
+    method: "POST",
+    body: JSON.stringify({
+      title: "Add dsh-code-nav to the file-viewer plugin catalog",
+      head: head,
+      base: "main",
+      body,
+    }),
+  });
+  const pd = await pr.json();
+  if (!pr.ok) { console.error(explainPrCreateFailure(pr.status, pd)); process.exit(1); }
+  console.log("PR CREATED:", pd.html_url);
+  console.log("DONE");
+}
+
+/**
+ * 幂等判定（纯函数）：给定按 head 过滤后的 open PR 列表，决定复用还是新建。
+ * @param {unknown} openPullRequests GitHub `GET /repos/{owner}/{repo}/pulls?head=…` 的结果
+ * @returns {{action:"reuse", url:string, number?:number} | {action:"create", url:null}}
+ */
+export function decidePrAction(openPullRequests) {
+  const list = Array.isArray(openPullRequests) ? openPullRequests : [];
+  const found = list.find((pr) =>
+    pr !== null && typeof pr === "object"
+    && typeof pr.html_url === "string" && pr.html_url.length > 0
+    && (pr.state === undefined || pr.state === "open"));
+  if (found) {
+    return {
+      action: "reuse",
+      url: found.html_url,
+      ...(typeof found.number === "number" ? { number: found.number } : {}),
+    };
+  }
+  return { action: "create", url: null };
+}
+
+/**
+ * 把创建 PR 的失败响应翻译成可读提示（纯函数，供测试）。
+ * @param {number} status HTTP 状态码
+ * @param {unknown} payload GitHub 错误体
+ * @returns {string}
+ */
+export function explainPrCreateFailure(status, payload) {
+  const message = payload !== null && typeof payload === "object" && typeof payload.message === "string"
+    ? payload.message
+    : "";
+  if (status === 422) {
+    return [
+      "[pr] 创建 PR 被 GitHub 拒绝（422）：可能已经存在同 head 的 open PR，或分支与 base 没有差异。",
+      ...(message.length > 0 ? ["[pr] GitHub 消息：" + message] : []),
+      "[pr] 请打开 https://github.com/" + UPSTREAM + "/pulls 检查；重跑本脚本会自动复用已存在的 PR。",
+    ].join("\n");
+  }
+  return "[pr] 创建 PR 失败（HTTP " + status + "）" + (message.length > 0 ? "：" + message : "") + "。";
+}
+
+/**
+ * 该 clone URL 是否指向本脚本的上游 better-sidebar 仓库（纯函数，供测试）。
+ * @param {string} url
+ * @returns {boolean}
+ */
+export function cloneOriginMatchesUpstream(url) {
+  const repo = normalizeRemoteRepo(url);
+  return repo !== null && repo.toLowerCase() === UPSTREAM.toLowerCase();
+}
+
+const isCli = process.argv[1] !== undefined
+  && pathToFileURL(process.argv[1]).href === import.meta.url;
+
+if (isCli) {
+  try {
+    await main();
+  } catch (error) {
+    console.error("[pr] " + String(error && error.message ? error.message : error));
     process.exit(1);
   }
 }
-
-// 待提交的改动应已在工作区（未提交修改随 checkout 保留）。
-// 用 `status --porcelain` 而非 `diff HEAD`，这样**新增**文件（untracked）也算数。
-// 若工作区干净但分支已有相对 origin/main 的提交，说明上次已提交成功 —— 直接复用，
-// 使重跑幂等。两者都没有才停下并给出可操作指引。
-const dirty = new Set(
-  (gitQ(["status", "--porcelain"]) || "")
-    .split("\n").map((l) => l.slice(3).trim().replace(/^"|"$/g, "")).filter(Boolean)
-);
-const dirtyPatched = PATCH_FILES.filter((f) => dirty.has(f));
-const aheadCommits = (gitQ(["rev-list", "--count", "origin/main..HEAD"]) || "0").trim();
-
-if (dirtyPatched.length > 0) {
-  sh("git", ["-C", CLONE, "add", ...PATCH_FILES]);
-  sh("git", ["-C", CLONE, "commit", "-m", "Add dsh-code-nav to the file-viewer plugin catalog"]);
-} else if (aheadCommits !== "0") {
-  console.log("工作区干净，分支 " + BRANCH + " 已有 " + aheadCommits + " 个提交，复用（跳过 commit）");
-} else {
-  console.error("[pr] clone 工作区里没有待提交的改动，且 " + BRANCH + " 相对 origin/main 没有提交。");
-  console.error("[pr] 期望改动的文件：" + PATCH_FILES.join(", "));
-  console.error("[pr] clone 目录：" + CLONE);
-  console.error("[pr] 本脚本只负责提交并推送**已准备好**的改动，不会自动改写上游源码。");
-  console.error("[pr] 请在该 clone 中编辑下列文件后重跑：");
-  console.error("[pr]   " + PATCH_FILES.join("\n[pr]   "));
-  console.error("[pr] 本次未提交、未推送。");
-  process.exit(1);
-}
-
-// 3) fork（已存在则忽略 422）—— 本地校验通过后才动远端
-{
-  const r = await gh(`/repos/${UPSTREAM}/forks`, { method: "POST" });
-  const d = await r.json();
-  if (r.ok) console.log("FORKED:", d.full_name);
-  else if (r.status === 422) console.log("FORK EXISTS (or already forked)");
-  else { console.error("fork failed", r.status, d.message || ""); process.exit(1); }
-}
-
-// 4) push 到 fork
-const forkUrl = "https://github.com/" + FORK + ".git";
-try { sh("git", ["-C", CLONE, "remote", "add", "fork", forkUrl]); }
-catch { sh("git", ["-C", CLONE, "remote", "set-url", "fork", forkUrl]); }
-sh("git", ["-C", CLONE, "push", "-u", "fork", BRANCH]);
-
-// 5) PR
-const body = [
-  "Adds **dsh-code-nav** to the built-in file-viewer plugin catalog (the \"add preview plugin\" modal).",
-  "",
-  "### Entry",
-  "- **id**: `dsh-code-nav` — code preview navigator for the better-sidebar editor",
-  "- **url**: https://github.com/" + PLUGIN_REPO,
-  "- **description** (zh/en/ja): per-language syntax highlighting + symbol outline (class/method/variable filter & jump) + in-file search; takes over code file preview",
-  "- **install**: `dsh plugin --profile web add https://github.com/" + PLUGIN_REPO + ".git`",
-  "",
-  "### Files",
-  "- `src/client/plugins-viewers.ts` — new catalog entry (alphabetical order)",
-  "- `src/client/locales.ts` — `pluginCodeNavDesc` in zh + en (key-set kept equal)",
-  "- `src/client/locales-ja.ts` — `pluginCodeNavDesc` in ja",
-  "",
-  "### Notes",
-  "- The repo is tagged `dsh-better-sidebar` (GitHub topic) for ecosystem discoverability",
-  "- `tests/plugin-list.spec.ts` shape rules are satisfied: unique id, GitHub URL, non-empty localized description, install starts with `cd ~/.dsh` and contains `dsh plugin`",
-].join("\n");
-
-const pr = await gh(`/repos/${UPSTREAM}/pulls`, {
-  method: "POST",
-  body: JSON.stringify({
-    title: "Add dsh-code-nav to the file-viewer plugin catalog",
-    head: FORK.split("/")[0] + ":" + BRANCH,
-    base: "main",
-    body,
-  }),
-});
-const pd = await pr.json();
-if (!pr.ok) { console.error("PR failed", pr.status, pd.message || "", pd.errors || ""); process.exit(1); }
-console.log("PR CREATED:", pd.html_url);
-console.log("DONE");

@@ -57,7 +57,10 @@ export function langOf(path) {
   const base = slash >= 0 ? path.slice(slash + 1) : path;
   const dot = base.lastIndexOf(".");
   if (dot < 0 || dot === base.length - 1) return null;
-  return LANG_EXT[base.slice(dot + 1).toLowerCase()] ?? null;
+  const ext = base.slice(dot + 1).toLowerCase();
+  // 不要用 `LANG_EXT[ext] ?? null`：`__proto__` / `constructor` 之类会命中原型链上的
+  // 继承属性（返回对象 / 函数而不是语言 id），必须只认自有属性。
+  return Object.hasOwn(LANG_EXT, ext) ? LANG_EXT[ext] : null;
 }
 
 /** 语言元数据：标签、注释语法、字符串引号、关键字、内建类型、额外高亮规则。 */
@@ -66,6 +69,9 @@ export const LANG_META = {
     label: "JavaScript",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    // 模板字符串可跨行；反斜杠仍然是转义符
+    multilineStrings: [{ open: "`", close: "`", escape: true }],
+    regexLiterals: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await null true false undefined NaN Infinity".split(" "),
     types: "Array BigInt Boolean Date Error Function Map Number Object Promise Proxy RegExp Set String Symbol WeakMap WeakSet JSON Math Intl ArrayBuffer DataView Uint8Array Int8Array Uint16Array Int16Array Uint32Array Int32Array Float32Array Float64Array".split(" ")
   },
@@ -73,6 +79,8 @@ export const LANG_META = {
     label: "TypeScript",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    multilineStrings: [{ open: "`", close: "`", escape: true }],
+    regexLiterals: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await interface type implements declare abstract readonly namespace module satisfies keyof infer is as asserts unknown never null true false undefined NaN".split(" "),
     types: "any boolean number string symbol object bigint void never unknown Array Boolean Error Function Map Number Object Promise RegExp Set String Symbol WeakMap WeakSet JSON Math Record Partial Required Readonly Pick Omit Exclude Extract ReturnType Parameters ConstructorParameters Awaited".split(" ")
   },
@@ -80,6 +88,8 @@ export const LANG_META = {
     label: "JSX",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    multilineStrings: [{ open: "`", close: "`", escape: true }],
+    regexLiterals: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await null true false undefined NaN".split(" "),
     types: "Array Boolean Date Error Function Map Number Object Promise RegExp Set String Symbol WeakMap WeakSet JSON Math".split(" ")
   },
@@ -87,6 +97,8 @@ export const LANG_META = {
     label: "TSX",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    multilineStrings: [{ open: "`", close: "`", escape: true }],
+    regexLiterals: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await interface type implements declare abstract readonly namespace satisfies keyof infer is as asserts unknown never null true false undefined NaN".split(" "),
     types: "any boolean number string symbol object bigint void never unknown Array Boolean Error Function Map Number Object Promise RegExp Set String Symbol WeakMap WeakSet JSON Math Record Partial Required Readonly Pick Omit".split(" ")
   },
@@ -109,6 +121,8 @@ export const LANG_META = {
     label: "C#",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "@\""],
+    // 逐字字符串：开 `@"`、闭 `"`，`""` 表示一个字面引号，可跨行
+    multilineStrings: [{ open: '@"', close: '"', escape: false, doubled: true }],
     keywords: "abstract as base bool break byte case catch char checked class const continue decimal default delegate do double else enum event explicit extern false finally fixed float for foreach goto if implicit in int interface internal is lock long namespace new null object operator out override params private protected public readonly ref return sbyte sealed short sizeof stackalloc static string struct switch this throw true try typeof uint ulong unchecked unsafe ushort using virtual void volatile while async await record init required file partial get set value when where yield".split(" "),
     types: "String Object Int32 Int64 Double Single Decimal Boolean Byte Char DateTime TimeSpan Guid Exception Console Math Task Task<T> IEnumerable List Dictionary HashSet StringBuilder Stream StreamReader StreamWriter HttpClient CancellationToken CancellationTokenSource".split(" ")
   },
@@ -122,7 +136,9 @@ export const LANG_META = {
   cpp: {
     label: "C++",
     lineComment: "//", blockComment: ["/*", "*/"],
-    strings: ["'", '"', "R\""],
+    // 原始字符串（`R"(x)"` / `R"d(...)d"`）会退化成 `R` 标识符 + 普通 `"..."` 字符串：
+    // 平铺 strings 里的定界符必须是「单字符」引号，多字符项永远合不上（会吞掉整行）。
+    strings: ["'", '"'],
     keywords: "alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t char32_t class compl concept const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype default delete do double dynamic_cast else enum explicit export extern false float for friend goto if inline int long mutable namespace new noexcept not not_eq nullptr operator or or_eq private protected public register reinterpret_cast requires return short signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid typename union unsigned using virtual void volatile wchar_t while xor xor_eq".split(" "),
     types: "string vector map unordered_map set unordered_set list deque queue stack pair tuple optional variant any shared_ptr unique_ptr weak_ptr string_view size_t int8_t int16_t int32_t int64_t uint8_t uint16_t uint32_t uint64_t ostream istream fstream ifstream ofstream".split(" ")
   },
@@ -130,20 +146,33 @@ export const LANG_META = {
     label: "Go",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    // 反引号原始字符串可跨行；其中反斜杠不是转义符
+    multilineStrings: [{ open: "`", close: "`", escape: false }],
     keywords: "break case chan const continue default defer else fallthrough for func go goto if import interface map package range return select struct switch type var true false iota nil".split(" "),
     types: "int int8 int16 int32 int64 uint uint8 uint16 uint32 uint64 uintptr float32 float64 complex64 complex128 bool byte rune string error any comparable".split(" ")
   },
   rust: {
     label: "Rust",
     lineComment: "//", blockComment: ["/*", "*/"],
-    strings: ["'", '"', "r\""],
+    // `r"..."` / `r#"..."#` 退化成 `r` 标识符 + 普通字符串（多字符定界符会吞行）。
+    // `'` 同时是字符字面量和生命周期标记，故只把字符字面量当字符串，
+    // `fn f<'a>(s: &'a str)` 这类生命周期不会被涂成字符串。
+    strings: ["'", '"'],
+    charLiteralOnly: true,
+    // Rust 的块注释可以嵌套：`/* a /* b */ c */` 只在外层闭合时结束
+    nestedBlockComments: true,
     keywords: "as async await break const continue crate dyn else enum extern false fn for if impl in let loop match mod move mut pub ref return self Self static struct super trait true type union unsafe use where while".split(" "),
     types: "u8 u16 u32 u64 u128 i8 i16 i32 i64 i128 f32 f64 usize isize bool char str String Vec Option Some None Result Ok Err Box Rc Arc HashMap HashSet VecDeque BTreeMap BTreeSet Cow".split(" ")
   },
   php: {
     label: "PHP",
-    lineComment: "//", blockComment: ["/*", "*/"],
+    blockComment: ["/*", "*/"],
+    // PHP 的 `#` 也是行注释；但 PHP 8 起 `#[...]` 是 attribute（见 commentHashAttribute）
+    lineComments: ["//", "#"],
+    commentHashAttribute: true,   // `#[Route('/x')]` 不是注释（PHP 8 attribute）
     strings: ["'", '"'],
+    // SQL 风格的关键字大小写不敏感：`SELECT` / `select` 都是关键字
+    caseInsensitiveKeywords: true,
     keywords: "abstract and array as break callable case catch class clone const continue declare default do echo else elseif empty enddeclare endfor endforeach endif endswitch endwhile enum eval exit extends final finally fn for foreach function global goto if implements include include_once instanceof insteadof interface isset list match namespace new or print private protected public readonly require require_once return static switch throw trait try unset use var while xor yield true false null".split(" "),
     types: "int float string bool array object iterable mixed void never resource null self parent".split(" ")
   },
@@ -158,19 +187,29 @@ export const LANG_META = {
     label: "Swift",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"'],
+    // Swift 的三引号字符串是真实语法（可跨行）
+    tripleStrings: ['"""'],
+    // Swift 的块注释可以嵌套
+    nestedBlockComments: true,
     keywords: "associatedtype class deinit enum extension fileprivate func import init inout internal let open operator private protocol public rethrows static struct subscript super switch throws try typealias var weak where async await actor some any guard defer repeat case default break continue fallthrough return if else for while do in is as true false nil Self".split(" "),
     types: "Int Int8 Int16 Int32 Int64 UInt UInt8 UInt16 UInt32 UInt64 Float Double Bool String Character Array Dictionary Set Optional Error Result Void Any AnyObject".split(" ")
   },
   kotlin: {
     label: "Kotlin",
     lineComment: "//", blockComment: ["/*", "*/"],
-    strings: ["'", '"', "\"\"\""],
+    strings: ["'", '"'],
+    // 三引号原始字符串复用跨行长字符串状态机（平铺 strings 里不能放多字符定界符）
+    tripleStrings: ['"""'],
+    // Kotlin 的块注释可以嵌套
+    nestedBlockComments: true,
     keywords: "as as? break class continue do else false for fun if in !in interface is !is null object package return super this throw true try typealias typeof val var when while by catch constructor delegate dynamic field file finally get import init param property receiver set setparam where actual abstract annotation companion const crossinline data enum expect external final infix inline inner internal lateinit noinline open operator out override private protected public reified sealed suspend tailrec vararg".split(" "),
     types: "Int Long Short Byte Double Float Boolean Char String Any Unit Nothing Array List MutableList Map MutableMap Set MutableSet Pair Triple Result".split(" ")
   },
   lua: {
     label: "Lua",
     lineComment: "--", blockComment: ["--[[", "]]"],
+    // `--[=*[ … ]=*]` 长注释（等级由 `=` 个数决定）
+    luaLongComments: true,
     strings: ["'", '"'],
     keywords: "and break do else elseif end false for function goto if in local nil not or repeat return then true until while".split(" "),
     types: "string number boolean table function thread userdata nil".split(" ")
@@ -179,6 +218,8 @@ export const LANG_META = {
     label: "Shell",
     lineComment: "#", blockComment: null,
     strings: ["'", '"', "`"],
+    // `#` 只在行首或空白 / `; & | (` 之后才起注释：`curl http://x#frag` 的 #frag 是 URL 片段
+    commentExtraBefore: " \t;&|(",
     keywords: "if then else elif fi case esac for while until do done function in select time coproc declare typeset local export readonly unset set shift source return break continue exit trap echo printf read test true false".split(" "),
     types: []
   },
@@ -186,6 +227,8 @@ export const LANG_META = {
     label: "Vue",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    // 单文件组件：只有 `<script>` 块按 JS/TS 分词，模板 / 样式行原样留白
+    scriptBlocks: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await interface type implements declare abstract readonly namespace null true false undefined NaN".split(" "),
     types: "any boolean number string symbol object void never unknown Array Boolean Error Function Map Number Object Promise RegExp Set String Symbol WeakMap WeakSet JSON Math Record Partial Required Readonly Pick Omit".split(" ")
   },
@@ -193,6 +236,7 @@ export const LANG_META = {
     label: "Svelte",
     lineComment: "//", blockComment: ["/*", "*/"],
     strings: ["'", '"', "`"],
+    scriptBlocks: true,
     keywords: "break case catch class const continue debugger default delete do else enum export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield async await interface type implements declare abstract readonly namespace null true false undefined NaN".split(" "),
     types: "any boolean number string symbol object void never unknown Array Boolean Error Function Map Number Object Promise RegExp Set String Symbol WeakMap WeakSet JSON Math Record Partial Required Readonly Pick Omit".split(" ")
   },
@@ -200,6 +244,8 @@ export const LANG_META = {
     label: "SQL",
     lineComment: "--", blockComment: ["/*", "*/"],
     strings: ["'", '"'],
+    // SQL 关键字大小写不敏感：`SELECT` / `select` 都是关键字
+    caseInsensitiveKeywords: true,
     keywords: "select from where insert into values update set delete create table view index alter drop truncate join inner left right full outer on group by order having limit offset union all distinct as asc desc and or not null primary key foreign references unique check default constraint begin commit rollback transaction case when then else end exists in like between is cast".split(" "),
     types: "int integer bigint smallint tinyint numeric decimal float real double money char varchar nvarchar text ntext binary varbinary bit date datetime timestamp time boolean json xml".split(" ")
   },
@@ -234,7 +280,9 @@ export const LANG_META = {
     // `#` 只有位于行首或空白之后才是注释（`url: http://x/a#frag` 的 #frag 是值）
     commentNeedsSpace: true,
     // `:` 必须后接空白才是映射（`a:1` 在 YAML 里是标量字符串）
-    keySep: ":", keyColonSpace: true
+    keySep: ":", keyColonSpace: true,
+    // `|` / `>` 块标量的正文行不参与键装饰（正文里的 `a: 1` / `#` 都是内容）
+    yamlBlockScalars: true
   },
   toml: {
     label: "TOML",
@@ -263,7 +311,8 @@ export const LANG_META = {
     keySep: "=:",
     keyEscape: true,           // `\` 是转义符：`key\:part` 的键是 `key:part`，`\:` 不是分隔符
     keySpaceSep: true,         // 空白也是分隔符：`server.port 8080` 的键是 `server.port`
-    keyBare: "properties"      // 无分隔符时整行即键（`key\:part`、行尾续行反斜杠的 `a\`）
+    keyBare: "properties",     // 无分隔符时整行即键（`key\:part`、行尾续行反斜杠的 `a\`）
+    keyContinuation: true      // 行尾奇数个反斜杠 → 下一行是上一键的值（与 config-outline 同口径）
   },
   dotenv: {
     label: "dotenv",
@@ -284,7 +333,10 @@ export const LANG_META = {
     xmlTags: true,
     // 属性值允许换行写（`attr="a\n b"`），故字符串状态跨行保持；
     // XML 属性值也没有反斜杠转义
-    multilineStrings: true
+    multilineStrings: [
+      { open: '"', close: '"', escape: false },
+      { open: "'", close: "'", escape: false }
+    ]
   }
 };
 

@@ -15,17 +15,198 @@ const RE_IDENT = /[A-Za-z_$][\w$]*/y;
 const RE_NUM = /\d[\w.]*|0[xX][0-9a-fA-F]+|\.\d[\w.]*/y;
 /** XML 名字：允许命名空间前缀与连字符（`xsl:template` / `my-tag`）。 */
 const RE_XMLNAME = /[A-Za-z_][\w.:-]*/y;
+/**
+ * Rust 字符字面量：`'x'` / `'\n'` / `'\x41'` / `'\u{1F600}'`。
+ * Rust 的 `'` 同时用于生命周期（`'a`），后者没有闭合引号，不能用普通字符串扫描。
+ */
+const RE_CHAR_LITERAL = /^'(?:\\(?:x[0-9a-fA-F]{2}|u\{[0-9a-fA-F]{1,6}\}|.)|[^'\\\n])'/;
 
 const _kwSets = new Map();
+const _kwLowerSets = new Map();
 const _typeSets = new Map();
 
 function wordSet(meta, key) {
   if (!_kwSets.has(key)) _kwSets.set(key, new Set(meta.keywords || []));
   return _kwSets.get(key);
 }
+/** 小写关键字集合：SQL / PHP 的关键字大小写不敏感。 */
+function lowerWordSet(meta, key) {
+  if (!_kwLowerSets.has(key)) {
+    _kwLowerSets.set(key, new Set((meta.keywords || []).map((w) => w.toLowerCase())));
+  }
+  return _kwLowerSets.get(key);
+}
 function typeSet(meta, key) {
   if (!_typeSets.has(key)) _typeSets.set(key, new Set(meta.types || []));
   return _typeSets.get(key);
+}
+
+/** 正则字面量只能出现在表达式位置：这些关键字之后可以，`a / b` 的 `a` 之后不行。 */
+const JS_REGEX_KEYWORDS = new Set(
+  "return case throw typeof instanceof in of new delete void yield await".split(" ")
+);
+
+/**
+ * 前一个「有效」字符 / 关键字是否处于可以跟正则字面量的表达式位置。
+ * 注释被视为透明（不刷新状态），字符串 / 数字之后则是值，`/` 是除法。
+ * @param {string} prevChar 上一个有效字符（空串表示行首 / 文件开头）
+ * @param {string} prevWord prevChar 所在单词的尾部（用于 return / typeof 等）
+ * @returns {boolean}
+ */
+function jsRegexAllowedAfter(prevChar, prevWord) {
+  if (prevChar === "") return true;
+  if ("=(:,[{!&|?+-*%^~<>;".includes(prevChar)) return true;
+  return prevWord !== "" && JS_REGEX_KEYWORDS.has(prevWord);
+}
+
+/**
+ * 扫描行内正则字面量（跳过 `[...]` 字符类与转义），返回结束偏移；不像正则时返回 -1。
+ * 正则不能跨行，故本行找不到未转义的 `/` 就落回普通标点 / 除法。
+ * @param {string} raw
+ * @param {number} start `/` 所在列
+ * @returns {number}
+ */
+function jsRegexLiteralEnd(raw, start) {
+  let k = start + 1;
+  let inClass = false;
+  for (; k < raw.length; k++) {
+    const ch = raw[k];
+    if (ch === "\\") { k++; continue; }
+    if (inClass) { if (ch === "]") inClass = false; continue; }
+    if (ch === "[") { inClass = true; continue; }
+    if (ch === "/") {
+      k++;
+      while (k < raw.length && /[A-Za-z]/.test(raw[k])) k++; // 标志位
+      return k;
+    }
+  }
+  return -1;
+}
+
+/** JS 标识符字符：正则上下文启发式（`prevWord` 累积 / SFC 扫描）共用。 */
+function isJsWordChar(ch) {
+  return ch === "_" || ch === "$" || (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") || (ch >= "0" && ch <= "9");
+}
+
+/**
+ * 从 j 起扫描块注释（j 已在开定界符之后），返回 { end, depth }。
+ * depth 是扫描结束后剩余的嵌套深度：0 表示本行已闭合。只有声明了
+ * `nestedBlockComments` 的语言才会数内层 `bStart`（Rust / Swift / Kotlin）。
+ * @returns {{end:number, depth:number}}
+ */
+function scanBlockComment(raw, j, bStart, bEnd, nested, depth) {
+  if (!nested) {
+    const e = raw.indexOf(bEnd, j);
+    return e === -1 ? { end: raw.length, depth } : { end: e + bEnd.length, depth: 0 };
+  }
+  // 嵌套语言逐字符前进：如果每层都重新 indexOf(bEnd)，深度嵌套会退化成二次方
+  let k = j;
+  while (k < raw.length) {
+    if (raw.startsWith(bStart, k)) {
+      depth++;
+      k += bStart.length;
+      continue;
+    }
+    if (raw.startsWith(bEnd, k)) {
+      depth--;
+      k += bEnd.length;
+      if (depth === 0) return { end: k, depth: 0 };
+      continue;
+    }
+    k++;
+  }
+  return { end: raw.length, depth };
+}
+
+/**
+ * 该位置的 `--[=*[` 是否是 Lua 长注释开头；是则返回开 / 闭定界符。
+ * @returns {{open:string, close:string}|null}
+ */
+function luaLongCommentAt(raw, j) {
+  if (raw[j] !== "-" || raw[j + 1] !== "-" || raw[j + 2] !== "[") return null;
+  let p = j + 3;
+  while (raw[p] === "=") p++;
+  if (raw[p] !== "[") return null;
+  const eq = p - (j + 3);
+  return { open: raw.slice(j, p + 1), close: "]" + "=".repeat(eq) + "]" };
+}
+
+/** YAML 行首缩进（空格 / Tab 各记 1 列）。 */
+function yamlIndentOf(raw) {
+  let i = 0;
+  while (i < raw.length && (raw[i] === " " || raw[i] === "\t")) i++;
+  return i;
+}
+
+/**
+ * 去掉 YAML 行尾注释（旧写法 `body.replace(/\s+#.*$/, "")` 的线性等价实现）。
+ *
+ * 旧正则不在行尾锚定：行内有一段长空白时，引擎会从每个空白起点贪婪吃完整段
+ * 再逐字符回退去找 `#` → O(空白长度²)（40k 空白 ≈ 470ms，见 review P2-3）。
+ * 这里一次从左到右扫过，命中的 `#` 才回退它前面那段连续空白。
+ * @param {string} body 已去掉行首空白的单行文本
+ * @returns {string}
+ */
+function stripYamlLineComment(body) {
+  for (let k = 1; k < body.length; k++) {
+    if (body[k] !== "#") continue;
+    const prev = body[k - 1];
+    if (prev !== " " && prev !== "\t") continue;
+    let start = k - 1;
+    while (start > 0 && (body[start - 1] === " " || body[start - 1] === "\t")) start--;
+    return body.slice(0, start);
+  }
+  return body;
+}
+
+/**
+ * 该行是否是 YAML 块标量头（`key: |` / `- >-` / `key: |2` 等）。
+ * 是则返回父键的缩进（正文行缩进 <= 它时块结束），否则返回 -1。
+ * @param {string} raw
+ * @returns {number}
+ */
+function yamlBlockScalarHeader(raw) {
+  // trimEnd 是线性的；不再用 `/\s+$/`（长空白 + 非空尾时 O(n²)）
+  const trimmed = raw.trimEnd();
+  if (trimmed.length === 0) return -1;
+  const body = trimmed.replace(/^\s+/, "");
+  if (body.startsWith("#")) return -1;
+  // 行尾注释不属于值（`key: | # note`）
+  const noComment = stripYamlLineComment(body);
+  // 指标必须紧跟 `:` 的值位置（或整行 / 列表项之后），且后面只能有 `-` `+` 数字
+  if (!/(?:^|:\s+|^-\s+)[|>][-+\d]*\s*$/.test(noComment)) return -1;
+  return yamlIndentOf(raw);
+}
+
+/**
+ * 跨行普通字符串规则：`{ open, close, escape, doubled }`。
+ * - `escape` 默认 true：反斜杠转义下一个字符；
+ * - `doubled`：闭合定界符连写表示一个字面定界符（C# 逐字字符串 `""`）。
+ * @returns {Array<{open:string, close:string, escape:boolean, doubled:boolean}>}
+ */
+function normalizeMultilineRules(meta) {
+  const raw = meta.multilineStrings;
+  if (!Array.isArray(raw)) return [];
+  const rules = [];
+  for (const item of raw) {
+    if (item === null || typeof item !== "object" || typeof item.open !== "string" || item.open.length === 0) continue;
+    const close = typeof item.close === "string" && item.close.length > 0 ? item.close : item.open;
+    rules.push({
+      open: item.open,
+      close,
+      escape: item.escape !== false,
+      doubled: item.doubled === true
+    });
+  }
+  return rules;
+}
+
+/** 找到与开定界符对应的跨行字符串规则（没有则说明该引号不跨行）。 */
+function multilineRuleFor(rules, quote) {
+  for (let i = 0; i < rules.length; i++) {
+    if (rules[i].open === quote) return rules[i];
+  }
+  return null;
 }
 
 /**
@@ -39,6 +220,7 @@ function tokenizeRun(code, meta, key) {
   const n = code.length;
   let i = 0;
   const kws = wordSet(meta, key);
+  const lowerKws = meta.caseInsensitiveKeywords === true ? lowerWordSet(meta, key) : null;
   const tys = typeSet(meta, key);
   const hasTypeHeuristic = (meta.types || []).length > 0;
   while (i < n) {
@@ -48,7 +230,8 @@ function tokenizeRun(code, meta, key) {
       const m = RE_IDENT.exec(code);
       const word = m[0];
       let cls = "c-ident";
-      if (kws.has(word)) cls = "c-kw";
+      const kwHit = lowerKws === null ? kws.has(word) : lowerKws.has(word.toLowerCase());
+      if (kwHit) cls = "c-kw";
       else if (tys.has(word)) cls = "c-type";
       else if (hasTypeHeuristic && word.length > 1 && word[0] >= "A" && word[0] <= "Z") cls = "c-type";
       segs.push({ text: word, cls });
@@ -186,16 +369,56 @@ function commentMarkers(meta) {
  * @param {string} raw 原始行
  * @param {number} j 标记起始列
  * @param {object} meta
+ * @param {string} marker 命中的注释标记（用于 `#[` 这类按标记区分的例外）
  * @returns {boolean}
  */
-function commentAllowedAt(raw, j, meta) {
+function commentAllowedAt(raw, j, meta, marker) {
+  // PHP 8 属性：`#[Route('/x')]` 的 `#` 后紧跟 `[`，是 attribute 不是行注释
+  // （review P2-4；真正注释行 `# note` / `# [x]` 不受影响）。
+  if (meta.commentHashAttribute === true && marker === "#" && raw[j + 1] === "[") return false;
   if (meta.commentLineStart === true) return raw.slice(0, j).trim().length === 0;
   if (meta.commentNeedsSpace === true) {
     if (j === 0) return true;
     const prev = raw[j - 1];
     return prev === " " || prev === "\t";
   }
+  // shell：`#` 在 `; & | (` 之后也能起注释（命令分隔符后），但 URL 片段 `x#frag` 不行
+  if (meta.commentExtraBefore !== undefined) {
+    if (j === 0) return true;
+    return meta.commentExtraBefore.includes(raw[j - 1]);
+  }
   return true;
+}
+
+/** 该行（去行首空白后）是否以注释标记开头。 */
+function isCommentOnlyLine(raw, meta) {
+  const head = raw.replace(/^\s+/, "");
+  for (const marker of commentMarkers(meta)) {
+    if (marker.length > 0 && head.startsWith(marker)) return true;
+  }
+  return false;
+}
+
+/**
+ * 行尾连续反斜杠个数（忽略行尾空白）。Java properties 规定**奇数**个才是续行。
+ * @param {string} line
+ * @returns {number}
+ */
+function trailingBackslashCount(line) {
+  const t = line.trimEnd();
+  let count = 0;
+  while (count < t.length && t[t.length - 1 - count] === "\\") count++;
+  return count;
+}
+
+/**
+ * 该行是否以「续行反斜杠」结尾。与 `config-outline.js` 的 `endsWithContinuation`
+ * 完全同口径（`a=foo\\` 的 `\\` 是转义出的字面反斜杠，不续行）。
+ * @param {string} line
+ * @returns {boolean}
+ */
+function propertiesEndsWithContinuation(line) {
+  return trailingBackslashCount(line) % 2 === 1;
 }
 
 /**
@@ -233,7 +456,8 @@ function keyRangeOf(raw, sep, colonNeedsSpace, opts) {
   // properties：键的截断规则与大纲共用 properties-key.js（含裸键、转义、行尾续行反斜杠）。
   // 走单独分支，避免两处各写一套判定而漂移。
   if (opts !== undefined && opts.bare === "properties") {
-    const body = rest.replace(/\s+$/, "");
+    // trimEnd 是线性的（`/\s+$/` 在长空白 + 非空尾时是 O(n²)，review P2-3）
+    const body = rest.trimEnd();
     const keyText = propertiesKeySlice(body);
     if (keyText.length === 0) return null;
     const at = body.indexOf(keyText);
@@ -270,7 +494,7 @@ function keyRangeOf(raw, sep, colonNeedsSpace, opts) {
     // 「大纲能列出、却不高亮」的不一致。
     const bare = opts === undefined ? undefined : opts.bare;
     if (bare === "ident") {
-      const keyText = rest.replace(/\s+$/, "");
+      const keyText = rest.trimEnd();
       if (keyText.length > 0 && /^[A-Za-z_][\w.-]*$/.test(keyText)) {
         return { start: lead, end: lead + keyText.length };
       }
@@ -300,10 +524,8 @@ function keyRangeOf(raw, sep, colonNeedsSpace, opts) {
 function decorateConfigLine(raw, segs, meta) {
   const sep = meta.keySep;
   if (sep === undefined || raw.trim().length === 0) return;
-  const head = raw.replace(/^\s+/, "");
-  for (const marker of commentMarkers(meta)) {
-    if (marker.length > 0 && head.startsWith(marker)) return;
-  }
+  // 注释行整行不参与（properties 续行行首的 `#` 已在续行分支里按值处理）
+  if (isCommentOnlyLine(raw, meta)) return;
   if (meta.keyQuoted === true) {
     // JSON / jsonc / json5：键是**字符串或裸标识符**，其后紧跟 ':'。
     // 按 token 逐个判断（而不是取「本行第一个分隔符」），故一行里写多个键也能全部上色，
@@ -338,51 +560,364 @@ function decorateConfigLine(raw, segs, meta) {
     return;
   }
   if (meta.sectionLines === true) {
-    // [section] / [[array-of-table]] 段头
-    const ms = /^\s*\[+([^\]]*?)\]+/.exec(raw);
-    if (ms !== null && ms[1].trim().length > 0) {
-      const at = raw.indexOf(ms[1], raw.indexOf("["));
-      if (at >= 0) markRange(segs, at, at + ms[1].length, "c-section");
+    // [section] / [[array-of-table]] 段头。手写线性扫描：正则 `/^\s*\[+([^\]]*?)\]+/`
+    // 在「一长串 `[` 且没有 `]`」时会灾难性回溯（二次方 / 指数级），50k 个 `[` 直接卡死。
+    let p = 0;
+    while (p < raw.length && (raw[p] === " " || raw[p] === "\t")) p++;
+    if (raw[p] === "[") {
+      while (p < raw.length && raw[p] === "[") p++;   // 开括号（`[[bin]]` 有两个）
+      const contentStart = p;
+      let q = p;
+      while (q < raw.length && raw[q] !== "]") q++;
+      // 必须有闭括号（与旧正则的 `\]+` 一致）；区间保持旧行为：`  [ x ]` 连空格一起标
+      if (q < raw.length && raw.slice(contentStart, q).trim().length > 0) {
+        markRange(segs, contentStart, q, "c-section");
+      }
     }
   }
 }
 
+/** `<script` 标签名后的边界（`<scriptx` 不是 script 标签）。 */
+function sfcTagBoundary(ch) {
+  return ch === undefined || ch === ">" || ch === "/" || /\s/.test(ch);
+}
+
+/**
+ * 从脚本正文里找真正的 `</script>`。实现一个自包含的「JS 词法感知」扫描：
+ *
+ * 状态：none / 引号字符串（`'` `"` `` ` ``）/ 行注释 / 块注释 / 正则字面量。
+ * **只有 state === none 时遇到的 `</script` 才是收尾标签** —— 字符串、
+ * 模板字符串、行 / 块注释、正则字面量（`/["']/`、`/it's/`）里的 `</script` 都不算。
+ *
+ * 正则起始用经典 prior-token 启发式（与 `tokenizeRun` 共用 `jsRegexAllowedAfter`）：
+ *   - 行首 / 前一个有效字符是 ``= ( [ { , ; : ! & | ? + - * % < > ~ ^`` → 可起正则；
+ *   - 前一个完整单词是 `return` / `typeof` / `case` / `throw` / … → 可起正则；
+ *   - 前一个有效 token 是标识符 / 数字 / 字符串 / 右括号 → `/` 是除法。
+ * 注释透明（不刷新 prior token）；换行复位 prior token；正则不能跨行（行内找不到
+ * 闭合 `/` 就按除法处理，绝不吞掉后面的行）。
+ *
+ * 扫描不到收尾标签时返回 null，调用方保持旧行为（`bodyEnd = n`）。**不会**回退成
+ * 盲目 `indexOf("</script")` —— 那会把字符串 / 正则里的同名文本当收尾标签（正是
+ * 本 bug 的反面）。
+ * @returns {{index:number, end:number}|null}
+ */
+function sfcFindScriptClose(text, from) {
+  let i = from;
+  const n = text.length;
+  let prevChar = "";
+  let prevWord = "";
+  const noteChar = (ch) => {
+    if (ch === " " || ch === "\t" || ch === "\r") return;
+    prevChar = ch;
+    if (isJsWordChar(ch)) prevWord = (prevWord + ch).slice(-16);
+    else prevWord = "";
+  };
+  while (i < n) {
+    const ch = text[i];
+    // 行注释：直到行尾（注释透明，prior token 不刷新）
+    if (ch === "/" && text[i + 1] === "/") {
+      const nl = text.indexOf("\n", i + 2);
+      i = nl < 0 ? n : nl + 1;
+      prevChar = "";
+      prevWord = "";
+      continue;
+    }
+    // 块注释：可跨行，同样透明；未闭合则后面不可能有真正的收尾标签
+    if (ch === "/" && text[i + 1] === "*") {
+      const end = text.indexOf("*/", i + 2);
+      if (end < 0) return null;
+      // 注释跨行时相当于 tokenizeRun 在新行复位 prior token
+      if (text.lastIndexOf("\n", end) >= i) { prevChar = ""; prevWord = ""; }
+      i = end + 2;
+      continue;
+    }
+    // 引号字符串 / 模板字符串：引号内的 `</script` 不算收尾
+    if (ch === '"' || ch === "'" || ch === "`") {
+      const quote = ch;
+      i++;
+      while (i < n) {
+        const c = text[i];
+        if (c === "\\") { i += 2; continue; }
+        if (c === quote) { i++; break; }
+        // 普通字符串不能跨行：源码不合法时在行尾放弃，别吞掉后续收尾标签
+        if (c === "\n" && quote !== "`") break;
+        i++;
+      }
+      prevChar = quote;   // 字符串是值：后面的 `/` 是除法
+      prevWord = "";
+      continue;
+    }
+    // 正则字面量：行内扫描 `[...]` 字符类与转义；不闭合就按除法继续
+    if (ch === "/" && jsRegexAllowedAfter(prevChar, prevWord)) {
+      let k = i + 1;
+      let inClass = false;
+      let closed = false;
+      for (; k < n; k++) {
+        const c = text[k];
+        if (c === "\n" || c === "\r") break;
+        if (c === "\\") { k++; continue; }
+        if (inClass) { if (c === "]") inClass = false; continue; }
+        if (c === "[") { inClass = true; continue; }
+        if (c === "/") { closed = true; k++; break; }
+      }
+      if (closed) {
+        while (k < n && /[A-Za-z]/.test(text[k])) k++; // 标志位
+        prevChar = "/";
+        prevWord = "";
+        i = k;
+        continue;
+      }
+    }
+    // 真正的收尾标签：只有走到这里（不在任何字符串 / 注释 / 正则里）才算。
+    // 手写扫描而不是 16 字符窗口正则，`</script   >` 允许任意多空白 / 换行。
+    if (ch === "<" && text[i + 1] === "/" && text.slice(i + 2, i + 8).toLowerCase() === "script") {
+      let k = i + 8;
+      while (k < n) {
+        const c = text[k];
+        if (c === " " || c === "\t" || c === "\n" || c === "\r" || c === "\f" || c === "\v") { k++; continue; }
+        break;
+      }
+      if (text[k] === ">") return { index: i, end: k + 1 };
+    }
+    if (ch === "\n") {
+      prevChar = "";
+      prevWord = "";
+      i++;
+      continue;
+    }
+    noteChar(ch);
+    i++;
+  }
+  return null;
+}
+
+/**
+ * 抽取 Vue/Svelte 的 `<script>` 正文区间（绝对偏移）。
+ * - 开标签的 `>` 要跳过引号内的字符（`<script data-x="a>b">` 不提前结束）；
+ * - 标签名 / 关闭标签大小写不敏感；
+ * - HTML 注释里的 `<script>` 不算；支持多个 script 块。
+ * @returns {Array<{start:number, end:number, lang:string}>}
+ */
+function sfcScriptRanges(text) {
+  const ranges = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    if (text[i] !== "<") {
+      i++;
+      continue;
+    }
+    if (text.startsWith("<!--", i)) {
+      const end = text.indexOf("-->", i + 4);
+      i = end < 0 ? n : end + 3;
+      continue;
+    }
+    if (text.slice(i, i + 7).toLowerCase() !== "<script" || !sfcTagBoundary(text[i + 7])) {
+      i++;
+      continue;
+    }
+    // 找开标签的 `>`（引号里的 `>` 不算）
+    let quote = "";
+    let p = i + 7;
+    for (; p < n; p++) {
+      const ch = text[p];
+      if (quote !== "") {
+        if (ch === quote) quote = "";
+        continue;
+      }
+      if (ch === '"' || ch === "'") { quote = ch; continue; }
+      if (ch === ">") break;
+    }
+    if (p >= n) break; // 开标签没闭合：忽略
+    // 自闭合 / 无正文的 script（`<script src="./main.ts" />`）：不找收尾标签，
+    // 否则整个剩余文件都会被当成脚本区间（review P2-2 第二形态）。
+    if (text[p - 1] === "/") {
+      i = p + 1;
+      continue;
+    }
+    const attrs = text.slice(i + 7, p);
+    const bodyStart = p + 1;
+    const close = sfcFindScriptClose(text, bodyStart);
+    const bodyEnd = close === null ? n : close.index;
+    const isTs = /lang\s*=\s*(?:"(?:ts|typescript)"|'(?:ts|typescript)'|(?:ts|typescript)(?=[\s/>]|$))/i.test(attrs);
+    ranges.push({ start: bodyStart, end: bodyEnd, lang: isTs ? "typescript" : "javascript" });
+    i = close === null ? n : close.end;
+  }
+  return ranges;
+}
+
+/** 在已算好的行首偏移表里定位绝对偏移所在行（二分查找）。 */
+function sfcLineIndexOf(lineStarts, offset) {
+  let lo = 0;
+  let hi = lineStarts.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (lineStarts[mid] <= offset) lo = mid;
+    else hi = mid - 1;
+  }
+  return lo;
+}
+
+/**
+ * Vue/Svelte 单文件组件分词：只有 `<script>` 块内按 JS / TS 分词，块外每行留白。
+ * 行号 / raw / str 都按原文件坐标保留；开 / 闭标签与脚本正文同行时按列切开。
+ * @param {string} text
+ * @param {string[]} lines
+ */
+function tokenizeScriptBlocks(text, lines) {
+  const ranges = sfcScriptRanges(text);
+  const lineStarts = [0];
+  for (let p = text.indexOf("\n"); p !== -1; p = text.indexOf("\n", p + 1)) lineStarts.push(p + 1);
+  const merged = new Array(lines.length).fill(null);
+  const mergedStr = new Array(lines.length).fill(false);
+  for (const range of ranges) {
+    const content = text.slice(range.start, range.end);
+    const sub = tokenizeLines(content, range.lang);
+    if (sub === null) continue;
+    const firstLine = sfcLineIndexOf(lineStarts, range.start);
+    for (let k = 0; k < sub.length; k++) {
+      const L = firstLine + k;
+      if (L >= lines.length) break;
+      let segs = sub[k].segs;
+      if (k === 0) {
+        const prefixLen = range.start - lineStarts[L];
+        if (prefixLen > 0) segs = [{ text: lines[L].slice(0, prefixLen), cls: "" }].concat(segs);
+      }
+      if (k === sub.length - 1) {
+        const suffix = lines[L].slice(range.end - lineStarts[L]);
+        if (suffix.length > 0) segs = segs.concat([{ text: suffix, cls: "" }]);
+      }
+      mergedStr[L] = mergedStr[L] || sub[k].str === true;
+      merged[L] = merged[L] === null ? segs : merged[L].concat(segs);
+    }
+  }
+  const out = new Array(lines.length);
+  for (let i = 0; i < lines.length; i++) {
+    let segs = merged[i];
+    // 块外（或多个块共享同一行等极端排版）：整行原样留白，保证不丢字符
+    if (segs === null || segs.map((s) => s.text).join("") !== lines[i]) {
+      segs = [{ text: lines[i], cls: "" }];
+    }
+    out[i] = { raw: lines[i], segs, str: mergedStr[i] === true };
+  }
+  return out;
+}
+
+/**
+ * 在不改变数组内容 / `deepEqual` 结果的前提下标记「内容超过 500 KB 上限、
+ * 尾部没有分词」。非枚举属性，与 `search.js` 的 `capped` / `outline.js` 的
+ * `capped` 同一惯例；客户端据此把截断事实显示出来（G2）。
+ * @template T
+ * @param {T} lines
+ * @returns {T}
+ */
+function markTokenizeTruncated(lines) {
+  if (lines.truncated !== true) Object.defineProperty(lines, "truncated", { value: true, enumerable: false });
+  return lines;
+}
+
 /**
  * 分词整个文件。
+ *
+ * 超过 500,000 字符只分词前面部分（防御性上限，宿主已经把文件大小当自己的
+ * 职责，这一刀是本插件自己的），但返回数组上会挂非枚举 `truncated: true`
+ * —— 客户端必须能说出「文件尾部没有参与渲染 / 查找 / 大纲」。
  * @param {string} text 文件内容
  * @param {string} lang 语言 id（LANG_META 键）
- * @returns {Array<{raw:string, segs:Array<{text:string, cls:string}>}> | null} 每行结果；语言未知或内容非法返回 null
+ * @returns {Array<{raw:string, segs:Array<{text:string, cls:string}>}> | null} 每行结果
+ *   （`truncated === true` 表示内容被 500KB 上限截断）；语言未知或内容非法返回 null
  */
 export function tokenizeLines(text, lang) {
+  if (typeof text !== "string" || !Object.hasOwn(LANG_META, lang)) return null;
   const meta = LANG_META[lang];
-  if (!meta || typeof text !== "string") return null;
-  if (text.length > 500000) text = text.slice(0, 500000); // 防御性上限
+  const truncated = text.length > 500000; // 防御性上限
+  if (truncated) text = text.slice(0, 500000);
   const lines = text.split(/\r?\n/);
+  // Vue/Svelte 单文件组件：只有 script 块按 JS/TS 分词，模板 / 样式行留白
+  if (meta.scriptBlocks === true) {
+    const out = tokenizeScriptBlocks(text, lines);
+    return truncated ? markTokenizeTruncated(out) : out;
+  }
   const out = new Array(lines.length);
   const key = lang;
   const lineCmts = commentMarkers(meta);
   const bStart = meta.blockComment ? meta.blockComment[0] : null;
   const bEnd = meta.blockComment ? meta.blockComment[1] : null;
+  const nestedBlocks = meta.nestedBlockComments === true;
+  const luaLong = meta.luaLongComments === true;
   const strings = meta.strings || [];
   // 跨行「长字符串」定界符：字符串项（`"""`，开闭相同）或 [开, 闭] 对
   // （XML CDATA 的 `<![CDATA[` … `]]>`）。
   const triples = (meta.tripleStrings || []).map((t) => (Array.isArray(t) ? t : [t, t]));
+  // 跨行普通字符串规则（`{open, close, escape, doubled}`）：JS 模板串、Go 原始串、
+  // C# 逐字串、XML 属性值。`close` 与开定界符可以不同（C# 开 `@"`、闭 `"`）。
+  const multilineRules = normalizeMultilineRules(meta);
   // XML 的标签内/外状态要跨行保持（属性可以换行写），故 runner 建在循环外
   const xmlRun = meta.xmlTags === true ? makeXmlRunner() : null;
   // 配置文件是否需要对「键 / 段头」补上色
   const decorate = meta.keySep !== undefined || meta.sectionLines === true;
-  let inBlock = false;          // 块注释进行中
+  let blockDepth = 0;           // 块注释嵌套深度（0 表示不在注释里）
+  let luaLongEnd = "";          // Lua 长注释进行中时其结束定界符
   let inTriple = false;         // 长字符串 / CDATA 进行中
   let tripleEnd = "";           // 其结束定界符
-  // 跨行普通字符串（XML 属性值允许换行）：只有声明了 multilineStrings 的语言才保持
   let inString = false;
-  let stringEnd = "";
+  let stringEnd = "";           // 续行字符串的闭定界符
+  let stringEscape = false;     // 续行中反斜杠是否转义
+  let stringDoubled = false;    // 续行中连写闭定界符是否表示字面定界符（C# `""`）
+  // YAML 块标量：父键缩进（>=0 表示正文中），正文行不参与键装饰
+  let yamlScalarIndent = -1;
+  // properties 续行（Java properties：行尾奇数个反斜杠 → 下一行是上一键的值）。
+  // 与 config-outline.js 的 `continued` 状态完全同口径，避免「大纲算值、高亮算键」。
+  const trackContinuation = meta.keyContinuation === true;
+  let propertiesContinued = false;
+  // JS 正则判定需要的「前一个有效字符 / 关键字」。`code` 是 rope，不能对每个 `/`
+  // 做随机下标（会反复摊平字符串，长行退化成二次方），故增量维护；
+  // 注释视为透明，字符串 / 数字之后视为值（`/` 是除法）。
+  const trackRegex = meta.regexLiterals === true;
+  let prevChar = "";
+  let prevWord = "";
+  const noteChar = trackRegex
+    ? (ch) => {
+      if (ch === " " || ch === "\t") return;
+      prevChar = ch;
+      if (isJsWordChar(ch)) prevWord = (prevWord + ch).slice(-16);
+      else prevWord = "";
+    }
+    : () => {};
+  const noteSegment = trackRegex
+    ? (text) => {
+      if (text.length === 0) return;
+      prevChar = text[text.length - 1];
+      prevWord = "";
+    }
+    : () => {};
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
+    // 行首本身是表达式位置（`/re/.test(x)` 常见于行首），故正则上下文按行重置
+    if (trackRegex) { prevChar = ""; prevWord = ""; }
+    // properties 续行：上一行以奇数个反斜杠结尾 → 本行是上一键的值的一部分
+    // （Java properties 语义）。整行按值处理：不再找键、行首的 `#` / `!` 也不是
+    // 注释；`str: true` 与 YAML 块标量正文同义，消费方不会把它当新的键值行。
+    // 空行 / 不带续行反斜杠的行结束续行态（与 config-outline.js 一致）。
+    if (propertiesContinued) {
+      propertiesContinued = propertiesEndsWithContinuation(raw);
+      out[i] = { raw, segs: raw.length > 0 ? [{ text: raw, cls: "c-string" }] : [], str: true };
+      continue;
+    }
     const segs = [];
     // 本行是否为「跨行长字符串的续行」：此时整行都是字符串内容，
     // 既不参与键 / 段头上色，也不应被大纲当成新的一行键值
     const longStringContinuation = inTriple || inString;
+    // YAML 块标量正文：缩进比父键更深（或空行）的行整行是标量内容，
+    // 既不能当键 / 段头装饰，也不能把正文里的 `#` 当注释。
+    if (meta.yamlBlockScalars === true && yamlScalarIndent >= 0) {
+      const isContent = raw.trim().length === 0 || yamlIndentOf(raw) > yamlScalarIndent;
+      if (isContent) {
+        out[i] = { raw, segs: raw.length > 0 ? [{ text: raw, cls: "c-string" }] : [], str: true };
+        continue;
+      }
+      yamlScalarIndent = -1; // 缩进回退 → 块结束，本行照常解析
+    }
     let code = "";
     const flush = () => {
       if (code.length > 0) {
@@ -393,64 +928,112 @@ export function tokenizeLines(text, lang) {
     };
     let j = 0;
     while (j < raw.length) {
-      // 跨行普通字符串续行（XML 属性值可换行写）：整段直到闭合引号都属于字符串，
-      // 其中的 `<` `>` 与名字都不参与标签 / 属性判定
+      // 跨行普通字符串续行：整段直到真正的闭定界符都属于字符串，
+      // 其中的 `<` `>`、注释标记、引号都不参与其它判定。
       if (inString) {
-        const e = raw.indexOf(stringEnd, j);
-        if (e === -1) {
-          segs.push({ text: raw.slice(j), cls: "c-string" });
+        let done = -1;
+        let k = j;
+        if (stringDoubled) {
+          // C# 逐字字符串：连写的 `""` 是字面引号，单个 `"` 才闭合
+          for (; k < raw.length; k++) {
+            if (raw[k] !== stringEnd) continue;
+            if (raw[k + 1] === stringEnd) { k++; continue; }
+            done = k;
+            break;
+          }
+        } else {
+          let esc = false;
+          for (; k < raw.length; k++) {
+            const ch = raw[k];
+            if (esc) { esc = false; continue; }
+            if (stringEscape && ch === "\\") { esc = true; continue; }
+            if (raw.startsWith(stringEnd, k)) break;
+          }
+          done = k < raw.length ? k : -1;
+        }
+        if (done === -1) {
+          const text = raw.slice(j);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
           j = raw.length;
         } else {
-          segs.push({ text: raw.slice(j, e + 1), cls: "c-string" });
-          j = e + 1;
+          const closeLen = stringDoubled ? 1 : stringEnd.length;
+          const text = raw.slice(j, done + closeLen);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
+          j = done + closeLen;
           inString = false;
           stringEnd = "";
+          stringDoubled = false;
         }
         continue;
       }
-      if (inBlock) {
-        const e = raw.indexOf(bEnd, j);
+      if (luaLongEnd !== "") {
+        const e = raw.indexOf(luaLongEnd, j);
         if (e === -1) {
           segs.push({ text: raw.slice(j), cls: "c-comment" });
           j = raw.length;
         } else {
-          segs.push({ text: raw.slice(j, e + bEnd.length), cls: "c-comment" });
-          j = e + bEnd.length;
-          inBlock = false;
+          segs.push({ text: raw.slice(j, e + luaLongEnd.length), cls: "c-comment" });
+          j = e + luaLongEnd.length;
+          luaLongEnd = "";
         }
+        continue;
+      }
+      if (blockDepth > 0) {
+        const scan = scanBlockComment(raw, j, bStart, bEnd, nestedBlocks, blockDepth);
+        segs.push({ text: raw.slice(j, scan.end), cls: "c-comment" });
+        blockDepth = scan.depth;
+        j = scan.end;
         continue;
       }
       if (inTriple) {
         const e = raw.indexOf(tripleEnd, j);
         if (e === -1) {
-          segs.push({ text: raw.slice(j), cls: "c-string" });
+          const text = raw.slice(j);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
           j = raw.length;
         } else {
-          segs.push({ text: raw.slice(j, e + tripleEnd.length), cls: "c-string" });
+          const text = raw.slice(j, e + tripleEnd.length);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
           j = e + tripleEnd.length;
           inTriple = false;
         }
         continue;
       }
-      // 块注释开始
+      // Lua 长注释开始：`--[[ … ]]` / `--[=*[ … ]=*]`（等级决定闭定界符）
+      if (luaLong && raw.startsWith("--[", j)) {
+        const lc = luaLongCommentAt(raw, j);
+        if (lc !== null) {
+          flush();
+          const e = raw.indexOf(lc.close, j + lc.open.length);
+          if (e === -1) {
+            segs.push({ text: raw.slice(j), cls: "c-comment" });
+            j = raw.length;
+            luaLongEnd = lc.close;
+          } else {
+            segs.push({ text: raw.slice(j, e + lc.close.length), cls: "c-comment" });
+            j = e + lc.close.length;
+          }
+          continue;
+        }
+      }
+      // 块注释开始（声明了 nestedBlockComments 的语言按深度配对）
       if (bStart !== null && raw.startsWith(bStart, j)) {
         flush();
-        const e = raw.indexOf(bEnd, j + bStart.length);
-        if (e === -1) {
-          segs.push({ text: raw.slice(j), cls: "c-comment" });
-          j = raw.length;
-          inBlock = true;
-        } else {
-          segs.push({ text: raw.slice(j, e + bEnd.length), cls: "c-comment" });
-          j = e + bEnd.length;
-        }
+        const scan = scanBlockComment(raw, j + bStart.length, bStart, bEnd, nestedBlocks, 1);
+        segs.push({ text: raw.slice(j, scan.end), cls: "c-comment" });
+        blockDepth = scan.depth;
+        j = scan.end;
         continue;
       }
       // 行注释（配置语言可有多个标记：ini 的 # 与 ;、properties 的 # 与 !）
       let commented = false;
       for (let c = 0; c < lineCmts.length; c++) {
         const marker = lineCmts[c];
-        if (marker.length > 0 && raw.startsWith(marker, j) && commentAllowedAt(raw, j, meta)) {
+        if (marker.length > 0 && raw.startsWith(marker, j) && commentAllowedAt(raw, j, meta, marker)) {
           flush();
           segs.push({ text: raw.slice(j), cls: "c-comment" });
           j = raw.length;
@@ -468,18 +1051,35 @@ export function tokenizeLines(text, lang) {
         flush();
         const e = raw.indexOf(close, j + open.length);
         if (e === -1) {
-          segs.push({ text: raw.slice(j), cls: "c-string" });
+          const text = raw.slice(j);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
           j = raw.length;
           inTriple = true;
           tripleEnd = close;
         } else {
-          segs.push({ text: raw.slice(j, e + close.length), cls: "c-string" });
+          const text = raw.slice(j, e + close.length);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
           j = e + close.length;
         }
         tripled = true;
         break;
       }
       if (tripled) continue;
+      // JS 正则字面量：`/[/*]/` 不能被当成 `/*` 块注释开头。
+      // 只有在表达式位置（前一个有效字符 / 关键字）才尝试，除法 `a / b` 不受影响。
+      if (meta.regexLiterals === true && raw[j] === "/" && jsRegexAllowedAfter(prevChar, prevWord)) {
+        const end = jsRegexLiteralEnd(raw, j);
+        if (end > 0) {
+          flush();
+          const text = raw.slice(j, end);
+          segs.push({ text, cls: "c-string" });
+          noteSegment(text);
+          j = end;
+          continue;
+        }
+      }
       // 普通字符串
       let strd = false;
       // XML 标签外的引号只是普通文本，只有标签内才可能是属性值定界符。
@@ -489,44 +1089,71 @@ export function tokenizeLines(text, lang) {
       for (let q = 0; allowString && q < strings.length; q++) {
         const quote = strings[q];
         if (quote.length === 0 || !raw.startsWith(quote, j)) continue;
+        // Rust：`'` 既可能是字符字面量，也可能是生命周期标注。只有形如字符字面量的
+        // 才当字符串；`'a` / `'static` 这类没有闭合引号，落回普通标点，
+        // 否则 `fn f<'a>(s: &'a str)` 整行都会被涂成字符串。
+        if (meta.charLiteralOnly === true && quote === "'" && !RE_CHAR_LITERAL.test(raw.slice(j))) continue;
+        // 该引号若声明了跨行规则，闭合用规则的 close（C# 开 `@"`、闭 `"`）
+        const rule = multilineRuleFor(multilineRules, quote);
+        const verbatim = rule !== null && rule.doubled === true;
+        const closeDelim = rule !== null ? rule.close : quote;
+        const escapes = !verbatim && (rule === null || rule.escape !== false);
         flush();
-        const verbatim = quote === "@\""; // C# 逐字字符串："" 转义、反斜杠不转义
         let k = j + quote.length;
         if (verbatim) {
+          // C# 逐字字符串：`""` 是转义出来的字面引号
           for (; k < raw.length; k++) {
-            if (raw[k] === '"') {
-              if (raw[k + 1] === '"') { k++; continue; }
-              break;
+            if (!raw.startsWith(closeDelim, k)) continue;
+            if (raw.startsWith(closeDelim, k + closeDelim.length)) {
+              k += closeDelim.length;
+              continue;
             }
+            break;
           }
         } else {
           let esc = false;
           for (; k < raw.length; k++) {
             const ch = raw[k];
-            // XML 属性值没有反斜杠转义（`\` 是普通字符），跨行时不能按转义跳过引号
             if (esc) { esc = false; continue; }
-            if (!meta.multilineStrings && ch === "\\") { esc = true; continue; }
-            if (ch === quote) break;
+            // XML 属性值 / Go 原始字符串里的反斜杠不是转义符
+            if (escapes && ch === "\\") { esc = true; continue; }
+            if (raw.startsWith(closeDelim, k)) break;
           }
         }
-        const end = k < raw.length ? k + 1 : raw.length;
-        segs.push({ text: raw.slice(j, end), cls: "c-string" });
-        // XML：引号未在本行闭合 → 字符串状态延到下一行（属性值可跨行）
-        if (meta.multilineStrings && k >= raw.length) {
+        const end = k < raw.length ? k + closeDelim.length : raw.length;
+        const text = raw.slice(j, end);
+        segs.push({ text, cls: "c-string" });
+        noteSegment(text);
+        // 引号未在本行闭合 → 若该定界符支持跨行，字符串状态延到下一行
+        if (k >= raw.length && rule !== null) {
           inString = true;
-          stringEnd = quote;
+          stringEnd = rule.close;
+          stringEscape = !verbatim && rule.escape !== false;
+          stringDoubled = verbatim;
         }
         j = end;
         strd = true;
         break;
       }
       if (strd) continue;
+      noteChar(raw[j]);
       code += raw[j];
       j++;
     }
     flush();
     if (decorate && !longStringContinuation) decorateConfigLine(raw, segs, meta);
+    // 本行是 YAML 块标量头 → 后续更深缩进的行按正文处理
+    if (meta.yamlBlockScalars === true) {
+      const headerIndent = yamlBlockScalarHeader(raw);
+      if (headerIndent >= 0) yamlScalarIndent = headerIndent;
+    }
+    // properties：本行是键值行且行尾奇数个反斜杠 → 下一行进续行态。
+    // 注释行不开启续行（config-outline.js 在注释行上 continue，不会置 continued）。
+    if (trackContinuation && raw.trim().length > 0 && propertiesEndsWithContinuation(raw)
+      && !isCommentOnlyLine(raw, meta)) {
+      propertiesContinued = true;
+    }
     out[i] = { raw, segs, str: longStringContinuation === true };
   }
-  return out;
+  return truncated ? markTokenizeTruncated(out) : out;
 }

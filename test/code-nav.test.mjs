@@ -1,16 +1,18 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, mkdirSync, writeFileSync, mkdtempSync } from "node:fs";
+import { readFileSync, mkdirSync, writeFileSync, mkdtempSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { langOf, LANG_EXT, LANG_META } from "../src/lang-registry.js";
 import { tokenizeLines } from "../src/tokenize.js";
 import { outlineOf, kindGroup, OUTLINE_MAX_SYMBOLS } from "../src/outline.js";
 import { findMatches, spansOfLine, MAX_MATCHES } from "../src/search.js";
-import { SELECTION_LIMIT, selectionHeader, buildSelectionInsert } from "../src/selection.js";
+import { SELECTION_LIMIT, selectionHeader, selectionWhere, selectionPayload, buildSelectionInsert } from "../src/selection.js";
+import { CHIP_PLACEHOLDER, detectTextOf, needsLeadingSpace } from "../src/draft-coords.js";
 import { RENDER_MAX_LINES, renderedLineCount, inRenderWindow, clipToRenderWindow, clipZeroBasedToRenderWindow } from "../src/render-window.js";
 import { propertiesKeyEnd, propertiesKeySlice, unescapePropertyKey } from "../src/properties-key.js";
 import { buildBundle, findCollisions, stripModule, topLevelNames, cnUsage, MODULES, EXPORTS } from "../scripts/build.mjs";
+import { redactRemoteUrl, countTests } from "../scripts/release-config.mjs";
 
 /** Java properties 里的字面反斜杠（避免在字符串转义里数不清个数）。 */
 const BS = String.fromCharCode(92);
@@ -1433,6 +1435,57 @@ test("buildSelectionInsert: over the limit keeps only the header", () => {
   assert.ok(buildSelectionInsert("/repo/a.ts", "/repo", undefined, edge).includes(edge));
 });
 
+test("selectionWhere: the chip label names the basename and line span", () => {
+  // 与 better-sidebar 的 `引用 {where}` 同一身份：文件名 + `L起[-止]`。
+  assert.equal(selectionWhere("C:\\repo\\app\\src\\a.ts", { start: 12, end: 15 }), "a.ts L12-15");
+  assert.equal(selectionWhere("/repo/app/src/a.ts", { start: 12, end: 12 }), "a.ts L12");
+  // 行号不可得（纯文本兜底视图）→ 只写文件名
+  assert.equal(selectionWhere("a.ts", undefined), "a.ts");
+  assert.equal(selectionWhere("C:\\repo\\app\\src\\a.ts", null), "a.ts");
+  // basename 为空（路径以分隔符结尾）→ 原样返回，不生成空标签
+  assert.equal(selectionWhere("/repo/app/", undefined), "/repo/app/");
+});
+
+test("selectionPayload: header / where / model text stay in lockstep", () => {
+  const payload = selectionPayload("C:\\repo\\app\\src\\a.ts", "C:\\repo\\app", { start: 4, end: 6 }, "let x = 1\nlet y = 2");
+  assert.deepEqual(payload, {
+    header: "src/a.ts:4-6",
+    where: "a.ts L4-6",
+    text: "```src/a.ts:4-6\nlet x = 1\nlet y = 2\n```"
+  });
+  // 超过上限：chip 仍指向这段行（where/header），模型只收到路径行
+  const long = selectionPayload("/repo/a.ts", "/repo", { start: 1, end: 1 }, "x".repeat(SELECTION_LIMIT + 1));
+  assert.equal(long.header, "a.ts:1");
+  assert.equal(long.where, "a.ts L1");
+  assert.equal(long.text, "a.ts:1");
+  // 旧入口 buildSelectionInsert 就是 payload.text，不能漂移
+  assert.equal(
+    buildSelectionInsert("C:\\repo\\app\\src\\a.ts", "C:\\repo\\app", { start: 4, end: 6 }, "let x = 1\nlet y = 2"),
+    payload.text
+  );
+});
+
+// ---------- draft 坐标（chip 折叠 / 分隔空格） ----------
+test("draft-coords: detectTextOf folds each chip to one placeholder", () => {
+  assert.equal(detectTextOf("", undefined), "");
+  assert.equal(detectTextOf("hello", []), "hello");
+  assert.equal(detectTextOf("hi @a.md there", [{ offset: 3, length: 5 }]), "hi " + CHIP_PLACEHOLDER + " there");
+  // 越界 / 长度非正 / 倒序条目被跳过（宁可不折，也不造乱序文本）
+  assert.equal(
+    detectTextOf("x@y", [{ offset: 1, length: 1 }, { offset: 3, length: 0 }, { offset: 9, length: 1 }]),
+    "x" + CHIP_PLACEHOLDER + "y"
+  );
+});
+
+test("draft-coords: needsLeadingSpace only before a non-space character", () => {
+  assert.equal(needsLeadingSpace("", 0), false);
+  assert.equal(needsLeadingSpace("hello", 0), false);
+  assert.equal(needsLeadingSpace("hello", 5), true);
+  assert.equal(needsLeadingSpace("hello ", 6), false);
+  assert.equal(needsLeadingSpace("hello", 99), true); // 越界按末尾处理
+  assert.equal(needsLeadingSpace("hello", -1), false);
+});
+
 // ---------- outline properties: 空白分隔 / 转义 / 续行奇偶 ----------
 test("outline properties: whitespace is a legal separator", () => {
   // Java properties 规范：`=` `:` 与**空白**都是键值分隔符
@@ -1728,6 +1781,29 @@ test("built client bundle wires search and outline through the render window", (
   }
 });
 
+test("built client bundle ships the clickable quote chip and its landing flash", () => {
+  const bundle = readFileSync(new URL("../lib/client.js", import.meta.url), "utf8");
+  // 与 better-sidebar 的 quote chip 同构：自有 source + codec + 点击落地
+  assert.ok(bundle.includes('const QUOTE_SOURCE = "codeNavQuote"'), "缺少引用 chip 的 input-trigger source 名");
+  assert.ok(bundle.includes('"dsh-code-nav:quote-refs"'), "引用记录没有持久化 key");
+  assert.ok(bundle.includes("input.insertReference("), "未走宿主的结构化引用通道");
+  // 中间回退用插件自己的恒等 codec source（不再依赖宿主 ui-reference 是否启用）
+  assert.ok(bundle.includes('const QUOTE_TEXT_SOURCE = "codeNavQuoteText"'), "缺少自有文本 chip 的中间回退 source");
+  // 新 chip 的载荷在 ref 里（cnq1: JSON），localStorage 只兼容旧记录
+  assert.ok(bundle.includes('"cnq1:"') || bundle.includes("'cnq1:'"), "缺少 payload-in-ref 的版本前缀");
+  // 公开 scoped-event 插入路径（不再硬依赖 InputBar 私有的 input.actions）
+  assert.ok(bundle.includes("slash/input-insert-text"), "缺少公开的 scoped-event 插入路径");
+  // 大纲复用已算好的 tokens
+  assert.ok(bundle.includes("__cn.outlineOfTokens("), "大纲没有复用 tokens（会二次整文件分词）");
+  assert.ok(bundle.includes('"selection.chip"') && bundle.includes('"selection.chipMissing"'), "缺少引用 chip 文案");
+  // 发送时靠 codec 展开；落地靠 line / lineEnd / onLineConsumed
+  assert.ok(bundle.includes("codec:") && bundle.includes("serialize:"), "缺少发送时展开的 codec");
+  assert.ok(bundle.includes("onLineConsumed"), "预览器未消费落地下发");
+  // 纯函数内联（模板用到就必须在导出面里）
+  assert.ok(bundle.includes("__cn.detectTextOf(") && bundle.includes("__cn.needsLeadingSpace("), "草稿坐标折叠未内联");
+  assert.ok(bundle.includes("__cn.selectionPayload("), "选区载荷构造未内联");
+});
+
 test("built client bundle keys its <style> tag by the full package name", () => {
   // client-modules 的 HMR 记账以**包名**为 key：失效/替换一个插件时它调用
   // removeOwnedStyles(id)，即删掉 data-plugin === <包名> 的 <style>。若这里写成
@@ -1881,6 +1957,16 @@ test("READMEs stay in sync with package.json and the documented workflow", () =>
   // prepack 是 npm 发布前的钩子：不在这儿构建，就可能把旧产物打进 tarball
   assert.ok(pkg.scripts.prepack.includes("scripts/build.mjs"), "scripts.prepack 未触发构建");
   assert.ok(pkg.scripts.test.includes("node --check lib/client.js"), "scripts.test 未做产物语法校验");
+  // 入口门禁：main / exports["."] 指向的 lib/index.js 必须被语法检查覆盖
+  // （曾经写坏入口也能全绿发布，见审查 P1-1）。
+  assert.ok(pkg.scripts.check.includes("node --check lib/index.js"), "scripts.check 未校验 host 入口 lib/index.js");
+  assert.ok(pkg.scripts.test.includes("node --check lib/index.js"), "scripts.test 未校验 host 入口 lib/index.js");
+  // 手写测试文件清单会漏跑：内置 runner 自动发现 test/ 下全部 *.test.mjs（审查 P1-2）。
+  // `node --test`（不带路径）由 Node 自己发现 test/ 下的测试文件；带目录参数在 Node 24
+  // 会被当成模块路径而直接报 MODULE_NOT_FOUND（本轮实测）。
+  assert.ok(pkg.scripts.test.trim().endsWith("node --test"), "scripts.test 未用 `node --test` 自动发现测试文件");
+  // npm publish 这条路也必须先过测试（prepublishOnly 是唯一挂点）。
+  assert.ok(pkg.scripts.prepublishOnly === "npm test", "缺少 scripts.prepublishOnly = npm test（npm publish 零门禁）");
 });
 
 test("CI workflow builds, checks, tests and refuses a stale bundle", () => {
@@ -1889,13 +1975,25 @@ test("CI workflow builds, checks, tests and refuses a stale bundle", () => {
   for (const step of [
     "node scripts/build.mjs",
     "node --check lib/client.js",
-    "node test/code-nav.test.mjs",
+    "node --check lib/index.js",
+    "npm test",
+    "node scripts/verify-pack.mjs",
     "git diff --exit-code -- lib/client.js",
     "npm pack",
     "node scripts/release-code-nav.mjs --dry-run"
   ]) {
     assert.ok(ci.includes(step), "CI 缺少步骤：" + step);
   }
+  // 顺序守卫：stale 检查必须排在 build **之后**。挪到前面时 `git diff` 比的是
+  // 还没重建的工作区，等于永远通过 —— 而旧的子串断言对此完全免疫（审查 P2-5）。
+  const buildAt = ci.indexOf("node scripts/build.mjs");
+  const staleAt = ci.indexOf("git diff --exit-code -- lib/client.js");
+  const verifyAt = ci.indexOf("node scripts/verify-pack.mjs");
+  assert.ok(buildAt > 0 && staleAt > buildAt, "CI 里 `git diff --exit-code -- lib/client.js` 必须在 `node scripts/build.mjs` 之后（否则这道门永远通过）");
+  // 打包内容校验必须真的作为一步跑（不只是出现在注释里）
+  assert.ok(verifyAt > buildAt, "CI 的 verify-pack 步骤必须排在 build 之后");
+  // 产物跨 OS 可复现：两个平台都必须跑一遍
+  assert.ok(ci.includes("windows-latest") && ci.includes("ubuntu-latest"), "CI 缺少 Windows/Linux 双平台矩阵");
   // 事件上下文绝不插进 shell（`${{ }}` 注入是 workflow 里的经典 RCE）
   assert.ok(!/\$\{\{\s*(github\.event|env)\b[^}]*\}\}/.test(ci.split("jobs:")[1] || ""), "CI 把事件上下文放进 shell");
   // 冒号哨兵：CI 没有第三方 YAML 解析器可用，而未加引号、值里带「: 」的标量（step 名里
@@ -1918,10 +2016,15 @@ test("CI workflow builds, checks, tests and refuses a stale bundle", () => {
 
 test("README states the real test count", () => {
   // README 里的「N 例 / N cases」曾经过期（写 61、实际更多）。
-  // 直接数本文件的顶层 test() 数量（与 node:test 的计数一致），再和 README 对齐，
-  // 这样新增测试却忘了改文档时会立刻失败。
-  const self = readFileSync(new URL("./code-nav.test.mjs", import.meta.url), "utf8");
-  const actual = (self.match(/^test\(/gm) || []).length;
+  // 直接数 test/ 下所有 *.test.mjs 的顶层 test() 数量，再和 README 对齐，
+  // 这样新增测试（含新增测试文件）却忘了改文档时会立刻失败。
+  const dir = new URL("./", import.meta.url);
+  const files = readdirSync(dir).filter((name) => name.endsWith(".test.mjs"));
+  let actual = 0;
+  for (const name of files) {
+    const source = readFileSync(new URL(name, dir), "utf8");
+    actual += (source.match(/^test\(/gm) || []).length;
+  }
   assert.ok(actual > 0, "未数到测试");
   const zh = readFileSync(new URL("../README.md", import.meta.url), "utf8");
   const en = readFileSync(new URL("../README_EN.md", import.meta.url), "utf8");
@@ -1931,6 +2034,33 @@ test("README states the real test count", () => {
   assert.ok(enClaim !== null, "README_EN.md 未找到测试数量声明");
   assert.equal(Number(zhClaim[1]), actual, "README.md 的测试数量已过期");
   assert.equal(Number(enClaim[1]), actual, "README_EN.md 的测试数量已过期");
+});
+
+test("release script derives the full test count across files", () => {
+  // Release 正文的「N/N tests pass」不能只数 code-nav.test.mjs：测试已拆到多个文件。
+  const dir = mkdtempSync(join(tmpdir(), "cn-count-"));
+  mkdirSync(join(dir, "test"));
+  writeFileSync(join(dir, "test", "a.test.mjs"), "test('a', () => {});\ntest('b', () => {});\n");
+  writeFileSync(join(dir, "test", "b.test.mjs"), "test('c', () => {});\n");
+  assert.equal(countTests(dir), 3);
+  assert.ok(countTests() > 124, "仓库里应统计到多个测试文件的总数");
+});
+
+test("release script redacts credentials embedded in a remote URL", () => {
+  const url = "https://x-access-token:ghp_abcdefgh12345678@github.com/o/r.git";
+  const red = redactRemoteUrl(url);
+  assert.ok(!red.includes("ghp_"), "PAT 没有被脱敏");
+  assert.ok(!red.includes("x-access-token"), "token 用户名没有被脱敏");
+  assert.ok(red.includes("***@github.com/o/r.git"), "脱敏后仍应保留主机与路径");
+  // scp-like 没有 userinfo 段，保持原样
+  assert.equal(redactRemoteUrl("git@github.com:o/r.git"), "git@github.com:o/r.git");
+});
+
+test("build output is LF-only regardless of input EOL", () => {
+  // Windows 的 core.autocrlf 会让 src/模板变成 CRLF；buildBundle 必须归一化，
+  // 否则产物在两个平台不一致（CI 的 committed-bundle 检查会误报 stale）。
+  const { code } = buildBundle();
+  assert.ok(!code.includes("\r"), "产物里仍有 CR，跨 OS 不一致");
 });
 
 // ---------- properties 键规则（大纲与高亮共用） ----------

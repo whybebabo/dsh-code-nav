@@ -10,13 +10,59 @@
  * - 版本 / tag：`package.json` 的 `version` → `v<version>`
  * - 产物名：`npm pack` 的实际文件名规则 `<name>-<version>.tgz`（scoped 包去掉 `@scope/`）
  */
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { gunzipSync } from "node:zlib";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 仓库根目录。 */
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+/**
+ * 跨平台地拼出「如何执行 npm」。
+ *
+ * Windows 上 `execFileSync("npm.cmd", …)` 会直接 EINVAL —— CreateProcess 不能执行
+ * 批处理文件。按可靠性从高到低选：
+ * 1. `process.env.npm_execpath`：由 npm 自己注入（`npm run …` / `npm exec` 内），
+ *    是 npm-cli.js 的绝对路径，用当前 node 执行它即可，完全可移植；
+ * 2. Node 安装目录自带的 `node_modules/npm/bin/npm-cli.js`（官方安装器布局）；
+ * 3. Windows 退回 `cmd.exe /d /s /c npm …`；其它平台直接 `npm`。
+ *
+ * @param {NodeJS.ProcessEnv} [env]
+ * @param {NodeJS.Platform} [platform]
+ * @param {string} [execPath]
+ * @returns {{cmd:string, args:string[]}}
+ */
+export function npmInvocation(env = process.env, platform = process.platform, execPath = process.execPath) {
+  const npmExecPath = env.npm_execpath;
+  if (typeof npmExecPath === "string" && npmExecPath.length > 0) {
+    return { cmd: execPath, args: [npmExecPath] };
+  }
+  if (platform === "win32") {
+    const bundled = join(dirname(execPath), "node_modules", "npm", "bin", "npm-cli.js");
+    if (existsSync(bundled)) return { cmd: execPath, args: [bundled] };
+    return { cmd: env.ComSpec || "cmd.exe", args: ["/d", "/s", "/c", "npm"] };
+  }
+  return { cmd: "npm", args: [] };
+}
+
+/**
+ * 同步执行一次 npm 子命令；失败时抛错（调用方决定是否继续/退出）。
+ * 默认工作目录是仓库根目录，stdio 继承（npm 自己的输出可见）。
+ * @param {string[]} args 例如 `["test"]` / `["pack", "--dry-run", "--json"]`
+ * @param {object} [options] 透传给 execFileSync（可覆盖 cwd/stdio/encoding）
+ * @returns {string|Buffer} execFileSync 的 stdout（覆盖 encoding 时是字符串）
+ */
+export function runNpm(args, options = {}) {
+  const invocation = npmInvocation();
+  return execFileSync(invocation.cmd, [...invocation.args, ...args], {
+    cwd: ROOT,
+    stdio: "inherit",
+    ...options,
+  });
+}
 
 /**
  * 允许在发布/PR 脚本文案里出现的**其它**仓库（不是发布目标）：
@@ -27,6 +73,28 @@ export const DOC_LINK_REPOS = ["omdsh-dev/DSH-better-sidebar"];
 /** 读取 package.json。 */
 export function readPkg(root = ROOT) {
   return JSON.parse(readFileSync(join(root, "package.json"), "utf8"));
+}
+
+/**
+ * 统计 `test/*.test.mjs` 里全部顶层 `test(` 的数量，供 Release 正文派生。
+ * 不能只数 `code-nav.test.mjs`：测试已经拆到多个文件，只数一个会在 Release
+ * 正文里写出远小于实际数量的「N/N unit tests pass」。
+ * @param {string} [root]
+ * @returns {number|null} 读不到 test/ 时返回 null
+ */
+export function countTests(root = ROOT) {
+  try {
+    const dir = join(root, "test");
+    let total = 0;
+    for (const name of readdirSync(dir)) {
+      if (!name.endsWith(".test.mjs")) continue;
+      const source = readFileSync(join(dir, name), "utf8");
+      total += (source.match(/^test\(/gm) || []).length;
+    }
+    return total;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -117,6 +185,22 @@ export function isSameRepo(url, expectedRepo) {
   return got !== null && got.toLowerCase() === String(expectedRepo).toLowerCase();
 }
 
+/**
+ * 打印 remote URL 前脱敏：`https://x-access-token:ghp_…@github.com/o/r.git`
+ * 这类 URL 的 userinfo 里可能带 PAT，原样打印会进终端历史 / CI 日志。
+ * scp 形式（`git@github.com:o/r.git`）没有 `://`，保持不变。
+ * @param {string} url
+ * @returns {string}
+ */
+export function redactRemoteUrl(url) {
+  if (typeof url !== "string") return url;
+  return url
+    .replace(/(:\/\/)[^/@\s]+@/g, "$1***@")
+    // 兜底：即使 token 出现在别处（例如错误信息拼接），也按常见前缀脱敏。
+    .replace(/\bgh[pousr]_[A-Za-z0-9]{8,}\b/g, "***")
+    .replace(/\bgithub_pat_[A-Za-z0-9_]{8,}\b/g, "***");
+}
+
 /** `v<version>` tag。 */
 export function tagOf(pkg = readPkg()) {
   if (typeof pkg.version !== "string" || pkg.version.length === 0) {
@@ -139,6 +223,171 @@ export function tgzNameOf(pkg = readPkg()) {
 /** 产物绝对路径。 */
 export function tgzPathOf(pkg = readPkg(), root = ROOT) {
   return join(root, tgzNameOf(pkg));
+}
+
+// ── npm pack 产物（.tgz）的零依赖读取与「新鲜度」校验 ──────────────────────────
+//
+// 曾经发布脚本只检查同名 `.tgz` 是否存在，于是 pack 之后任何一次源码/文档改动
+// 都会让上传的 Release 附件与 tag 指向的源码不一致，而 `npm test` 照样全绿
+// （见审查 P0-1）。这里用 **零依赖** 的方式读 tarball：`node:zlib` gunzip +
+// 512 字节 ustar 头遍历，不引入 tar 依赖。
+
+/** tar 头块大小。 */
+const TAR_BLOCK = 512;
+
+/** 读固定长度字段里的 C 字符串（NUL 截断；超长时截到字段末尾）。 */
+function tarString(buffer, start, length) {
+  const limit = Math.min(buffer.length, start + length);
+  const nul = buffer.indexOf(0, start);
+  const end = nul === -1 || nul > limit ? limit : nul;
+  return buffer.toString("utf8", start, end);
+}
+
+/** 读八进制数字字段（ustar 的 size / mode 等）；空字段或非法值按 0 处理。 */
+function tarOctal(buffer, start, length) {
+  const text = tarString(buffer, start, length).replace(/\0/g, "").trim();
+  if (text.length === 0) return 0;
+  const value = Number.parseInt(text, 8);
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/**
+ * 零依赖解析 `.tar.gz`，返回 `Map<成员名, Buffer>`。
+ *
+ * 支持 ustar 的 `prefix` 字段（长路径）与 `typeflag`：
+ * - `'0'` / `'\0'`（普通文件）：记录内容；
+ * - `'x'` / `'g'` / `'K'`（PAX 扩展头 / 全局头 / 长链接名）：跳过，继续读真实条目；
+ * - `'L'`（GNU 长文件名）：把下一块的 name 换成它的内容。
+ * 目录 / 链接等其它条目直接忽略 —— 发布校验只关心文件内容。
+ *
+ * @param {Buffer} tgzBuffer `.tar.gz` 的完整字节
+ * @returns {Map<string, Buffer>} 成员路径 → 内容
+ * @throws 不是有效 gzip / tarball 被截断时抛错
+ */
+export function readTgzEntries(tgzBuffer) {
+  if (!Buffer.isBuffer(tgzBuffer)) throw new TypeError("readTgzEntries 需要 Buffer");
+  const tar = gunzipSync(tgzBuffer);
+  const entries = new Map();
+  let offset = 0;
+  let longName = null;
+  while (offset + TAR_BLOCK <= tar.length) {
+    const header = tar.subarray(offset, offset + TAR_BLOCK);
+    // 连续两个全零块是归档结束标记（读到第一个就够了）。
+    if (header.every((byte) => byte === 0)) break;
+    const size = tarOctal(header, 124, 12);
+    const type = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
+    const dataStart = offset + TAR_BLOCK;
+    const dataEnd = dataStart + size;
+    if (dataEnd > tar.length) {
+      throw new Error("tarball 被截断：条目 " + tarString(header, 0, 100) + " 需要 " + size + " 字节，实际只剩 " + (tar.length - dataStart));
+    }
+    const data = tar.subarray(dataStart, dataEnd);
+    offset = dataStart + Math.ceil(size / TAR_BLOCK) * TAR_BLOCK;
+    if (type === "x" || type === "g" || type === "K") continue;   // PAX / 长链接名：不是文件内容
+    if (type === "L") { longName = tarString(data, 0, data.length).replace(/\0+$/, ""); continue; }
+    if (type !== "0" && type !== "7") continue;                    // 目录 / 链接等不参与校验
+    let name = longName !== null ? longName : tarString(header, 0, 100);
+    longName = null;
+    const prefix = tarString(header, 345, 155);
+    if (prefix.length > 0) name = prefix + "/" + name;
+    entries.set(name.replace(/^\.\//, ""), data);
+  }
+  return entries;
+}
+
+/**
+ * 从 `.tar.gz` 里读一个成员；不存在返回 null。
+ * @param {Buffer} tgzBuffer `.tar.gz` 的完整字节
+ * @param {string} member 成员路径，例如 `package/package.json`
+ * @returns {Buffer|null}
+ */
+export function readTgzEntry(tgzBuffer, member) {
+  if (typeof member !== "string" || member.length === 0) {
+    throw new TypeError("readTgzEntry 需要成员路径字符串");
+  }
+  const wanted = member.replace(/^\.\//, "").replace(/^\//, "");
+  const found = readTgzEntries(tgzBuffer).get(wanted);
+  return found === undefined ? null : found;
+}
+
+/** 字符串 / Buffer 的 sha256（hex 小写）。 */
+function sha256Of(value) {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+/**
+ * 校验发布产物是否由**当前这棵树**生成（审查 P0-1 的正式修复）。
+ *
+ * 检查两件事：
+ * 1. tarball 内 `package/package.json` 的 `version` 必须等于 `version` 参数
+ *    （挡住「把旧版本的包改名成当前版本」）；
+ * 2. tarball 内 `package/lib/client.js` 的 sha256 必须等于 `buildCode` 的 sha256
+ *    （挡住「pack 之后又改了源码/模板」）。
+ *
+ * 刻意**不抛业务错误**：返回 `{fresh, reasons}`，调用方决定打印/退出 ——
+ * live 发布必须据此拒绝，dry-run 只打印而不改变 exit 0。只有参数类型错误才抛。
+ *
+ * @param {{tgzPath:string, version:string, buildCode:string}} options
+ * @returns {{fresh:boolean, reasons:string[], tgzPath:string, expectedVersion:string,
+ *   tarballVersion:string|null, expectedSha256:string, tarballSha256:string|null}}
+ */
+export function checkArtifactFreshness({ tgzPath, version, buildCode } = {}) {
+  if (typeof tgzPath !== "string" || tgzPath.length === 0) throw new TypeError("checkArtifactFreshness: tgzPath 必须是非空字符串");
+  if (typeof version !== "string" || version.length === 0) throw new TypeError("checkArtifactFreshness: version 必须是非空字符串");
+  if (typeof buildCode !== "string" || buildCode.length === 0) throw new TypeError("checkArtifactFreshness: buildCode 必须是非空字符串");
+  const result = {
+    fresh: false,
+    reasons: [],
+    tgzPath,
+    expectedVersion: version,
+    tarballVersion: null,
+    expectedSha256: sha256Of(buildCode),
+    tarballSha256: null,
+  };
+  let tgzBuffer;
+  try {
+    tgzBuffer = readFileSync(tgzPath);
+  } catch (error) {
+    result.reasons.push("无法读取产物 " + tgzPath + "：" + String(error && error.message ? error.message : error));
+    return result;
+  }
+  let entries;
+  try {
+    entries = readTgzEntries(tgzBuffer);
+  } catch (error) {
+    result.reasons.push("无法解开 tarball（不是有效的 .tar.gz）：" + String(error && error.message ? error.message : error));
+    return result;
+  }
+  const pkgEntry = entries.get("package/package.json") ?? null;
+  if (pkgEntry === null) {
+    result.reasons.push("tarball 里缺少 package/package.json");
+  } else {
+    try {
+      const meta = JSON.parse(pkgEntry.toString("utf8"));
+      if (typeof meta.version === "string") result.tarballVersion = meta.version;
+    } catch {
+      result.reasons.push("tarball 里的 package/package.json 不是合法 JSON");
+    }
+    if (result.tarballVersion === null) {
+      result.reasons.push("tarball 里的 package/package.json 缺少 version 字段");
+    } else if (result.tarballVersion !== version) {
+      result.reasons.push("tarball 版本 " + result.tarballVersion + " 与 package.json 版本 " + version + " 不一致");
+    }
+  }
+  const clientEntry = entries.get("package/lib/client.js") ?? null;
+  if (clientEntry === null) {
+    result.reasons.push("tarball 里缺少 package/lib/client.js");
+  } else {
+    result.tarballSha256 = sha256Of(clientEntry);
+    if (result.tarballSha256 !== result.expectedSha256) {
+      result.reasons.push(
+        "tarball 内 lib/client.js 与当前构建不一致（tarball " + result.tarballSha256.slice(0, 12) +
+        "… ≠ 当前 " + result.expectedSha256.slice(0, 12) + "…）"
+      );
+    }
+  }
+  result.fresh = result.reasons.length === 0;
+  return result;
 }
 
 /** MIME 顶级类型：`application/gzip` 这类字符串形状与 `owner/repo` 相同，需排除。 */

@@ -13,22 +13,38 @@ on:
 
 jobs:
   build-and-test:
-    runs-on: ubuntu-latest
+    # 两个平台都跑：产物是「构建期拼接 + 逐字比对」，EOL 处理错一次就会让另一个
+    # 平台的 committed-bundle 检查误报（历史上 Windows 构建比 Linux 多 2 个空行）。
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
       - name: Build client bundle
         run: node scripts/build.mjs
 
-      - name: Syntax-check the bundle
-        run: node --check lib/client.js
+      - name: Syntax-check the bundle and the host entry
+        # package.json 的 main / exports["."] 指向 lib/index.js —— DSH loader 真正
+        # import 的入口。只查 lib/client.js 时，写坏入口也能全绿发布（审查 P1-1）。
+        run: node --check lib/client.js && node --check lib/index.js
 
       - name: Unit tests
-        run: node test/code-nav.test.mjs
+        run: npm test
+
+      - name: Verify packed tarball contents
+        # 发布产物必须真的包含运行期文件（lib/*、cordis.patch.yml、两份 README）。
+        # 只跑 `npm pack` 不检查清单时，package.json.files 少一项也会全绿，
+        # 直到用户安装 / DSH 组合 bundle 时才炸。
+        run: node scripts/verify-pack.mjs
 
       - name: Fail if the committed bundle is stale
         # 单测里已有同样的逐字比对，这里是第二道更直白的门：上一步刚构建过，

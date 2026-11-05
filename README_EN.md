@@ -2,10 +2,10 @@
 
 > **This is a fork of [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav).**
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
-> (since v0.1.2), **common config-file support** (since v0.2.0) and **Protocol Buffers
-> support** (since v0.3.0), published to npm as
+> (since v0.1.2), **common config-file support** (since v0.2.0), **Protocol Buffers
+> support** (since v0.3.0) and a **clickable quote chip** (since v0.4.0), published to npm as
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
-> (current version **0.3.0**).
+> (current version **0.4.0**; until this version is published the registry still serves 0.3.0).
 > See [**Fork notes**](#fork-notes) below; the v0.1.2 change is open upstream as PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
@@ -16,13 +16,13 @@ When you open a code file in the sidebar, it detects the language by file type a
 - 🎨 **Per-language syntax highlighting** — extension → language detection with a lightweight hand-rolled tokenizer (comments / strings / keywords / types / numbers / functions); light & dark palettes follow the app theme automatically
 - 🧭 **Symbol outline navigation** — parses `class` / `interface` / `struct` / `enum` / `impl`, methods / functions, variables / fields / constants; filter by **All / Class / Method / Variable** chips, or jump from a dropdown symbol list (line flash on jump; symbol rows are keyboard reachable via Tab + `Enter` / `Space`); at most 500 symbols per file, with a notice above the code when the list is capped
 - 🔍 **In-file search** — highlights all matches, emphasizes the current one, shows `n/m` count, navigates with ↑/↓ buttons or `Enter` / `Shift+Enter`, with a match-case toggle; matches **literal substrings** (`.`, `*`, `(` are just themselves), up to 2000 matches, shown as `2000+` once capped
-- 🖱️ **Selection → add to conversation** — select code in the preview and an "Add to conversation" button floats above the selection; clicking it inserts the selection into the current session's composer as a fenced block headed by `relative/path:start[-end]` (the same payload shape as the better-sidebar built-in viewers; selections over 500 characters insert the path line only)
+- 🖱️ **Selection → add to conversation** — select code in the preview and an "Add to conversation" button floats above the selection; clicking it drops a clickable **quote chip** (`Quote <file> Lstart[-end]`, the same shape as the better-sidebar 0.30 quote chip) into the composer: the draft stays compact and the chip **expands on send** into a fenced block headed by `relative/path:start[-end]` (selections over 500 characters keep the path line only); clicking the chip jumps back to the source file and flashes the quoted lines. Hosts without a chip channel (or an unwritable record store) fall back along the better-sidebar chain: built-in `reference` chip → inserting the fenced block directly
 - 🗂️ **Common config formats** — JSON / YAML / TOML / XML / INI / properties / dotenv get highlighting and a structural outline too: keys, section headers, XML elements and XML attributes are coloured separately, section headers group under **Class** while keys and attributes group under **Variable**, and nesting shows as `key — container` in the symbol list
 
 ## Prerequisites
 
 - DSH (`dsh web`) running
-- [dsh-better-sidebar](https://www.npmjs.com/package/dsh-better-sidebar) installed (including the bundled scenario via the aggregate package `@linxin666/dsh-web-ui-all`)
+- [dsh-better-sidebar](https://www.npmjs.com/package/dsh-better-sidebar) installed (including the bundled scenario via the aggregate package `@linxin666/dsh-web-ui-all`); the quote chip's click-through needs **0.30.0+** (older versions still get the chip and the correct expansion, but a click does not land on the lines)
 
 ## Install
 
@@ -41,7 +41,7 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 Name an **exact** version instead of relying only on the `^` range (take the number from the banner above, or `npm view @whybebabo/dsh-code-nav version`):
 
 ```
-@whybebabo/dsh-code-nav@0.3.0
+@whybebabo/dsh-code-nav@0.4.0
 ```
 
 pnpm 11's supply-chain guard defaults to `minimumReleaseAge: 1440`, i.e. only versions published at least 24 hours ago are preferred. Because that is a **built-in default** rather than an explicit setting, `minimumReleaseAgeStrict` defaults to `false`: pnpm does not fail, it falls back to a version old enough to satisfy the age gate. So with `^0.1.1` still recorded, installing again resolves 0.1.1 (mature) over a newer release (too new) and **reports success while the installed version never changes**.
@@ -72,6 +72,16 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 > labels and `map<...>`) and enum values become variables; proto2 `group` bodies nest
 > under the group name; fully-qualified names like `.foo.Bar` are recognised.
 > See [Supported languages](#supported-languages) below.
+>
+> 0.4.0 is the **quote-chip release**: "Add to conversation" no longer dumps the whole
+> fenced block into the composer. It drops a quote chip shaped like the better-sidebar
+> 0.30 one (`Quote <file> Lstart[-end]`), so the draft stays compact and the chip
+> **expands on send** into the very same fenced block (byte-for-byte payload unchanged);
+> clicking the chip jumps back to the source file and flashes the quoted lines. The quote
+> payload lives in the chip's own ref (`cnq1:` + JSON) and is **never written to storage**,
+> so a refresh, another tab or clearing site data cannot kill the chip. Hosts without a
+> chip channel (older DSH, no `inputTriggers`) fall back to this plugin's own plain-text
+> chip and then to inserting the fenced block directly, so the capability is never lost.
 
 ## Fork notes
 
@@ -79,20 +89,21 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 
 **Why fork**: upstream registers its viewer with `priority: 10`, so for the extensions it handles the built-in `TextEditor` never mounts — and better-sidebar's "selection → add to conversation" popup lives inside `TextEditor` only, while the `betterSidebar` service exposes no selection / popup / draft API at all. Those files therefore lose the capability outright. Upstream has no such feature and there was a local need for it.
 
-**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support; v0.2.1 fixes style ownership; v0.2.2 fixes correctness and hardens the build / release pipeline; v0.3.0 adds Protocol Buffers):
+**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support; v0.2.1 fixes style ownership; v0.2.2 fixes correctness and hardens the build / release pipeline; v0.3.0 adds Protocol Buffers; v0.4.0 makes the quote chip clickable):
 
-| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.3.0` |
+| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.4.0` |
 |---|---|---|
-| Selection → add to conversation | ❌ absent (lost once the viewer takes over) | ✅ floating button above the selection → inserts into the composer |
-| Insert payload | — | same shape as the built-in viewers: fenced block headed by `relative/path:start[-end]`; >500 chars inserts the path line only |
+| Selection → add to conversation | ❌ absent (lost once the viewer takes over) | ✅ floating button above the selection → a quote chip in the composer |
+| Draft shape | — | same shape as better-sidebar 0.30: a compact `Quote <file> Lstart[-end]` chip; clicking it jumps back to the source file and flashes the quoted lines |
+| Insert payload | — | the chip's codec expands it on send into a fenced block headed by `relative/path:start[-end]` (byte-for-byte the built-in viewers' payload); >500 chars keeps the path line only |
 | Line accuracy | — | read from the line containers plus the per-line code column, so the `user-select: none` gutter never leaks in; a selection ending exactly at the next line start narrows the span |
-| Insert mechanism | — | prefers the official `captureInsertion()` / `insertText()` (one undo step, reference chips preserved, refuses without touching the draft while the composer is busy); falls back to `setDraft` on older hosts |
+| Insert mechanism | — | own `@` input-trigger source (`codeNavQuote`) + codec + `insertReference()`; falls back to this plugin's own plain-text chip (`codeNavQuoteText`) when the host has no chip channel or the ref cannot be resolved, then to the official `insertText()`, then to `setDraft` on older hosts |
 | Popup dismissal | — | same contract as better-sidebar: outside mousedown / Escape / hidden document / blur / scroll / surface leaving the viewport |
 | Config-file support | ❌ none (json / yaml / toml / xml … fall to the built-in viewer, no highlighting or outline) | ✅ highlighting + structural outline for JSON / YAML / TOML / XML / INI / properties / dotenv |
 | Added language | ❌ no `.proto` | ✅ Protocol Buffers (`.proto`): highlighting + outline for message / enum / enum value / oneof / field / service / rpc / extend |
-| Outline / search correctness | — | every `<script>` block of a Vue / Svelte file is parsed with line numbers mapped back to the original file; case-insensitive matches report original-text coordinates (characters whose lowercase form changes length no longer shift positions); JSON keys are unescaped (`\uXXXX` etc.); the silent caps (2000 matches / 500 symbols) are surfaced in the UI |
+| Outline / search correctness | — | every `<script>` block of a Vue / Svelte file is parsed with line numbers mapped back to the original file; case-insensitive matches report original-text coordinates (characters whose lowercase form changes length no longer shift positions); JSON keys are unescaped (`\uXXXX` etc.); the caps (500 KB content truncation / 2000 matches / 500 symbols) are surfaced in the UI |
 | Package name | `dsh-code-nav` | `@whybebabo/dsh-code-nav` (avoids claiming the upstream name) |
-| Version | 0.1.0 (not on npm) | 0.3.x (published to npm; see `package.json`) |
+| Version | 0.1.0 (not on npm) | 0.4.x (published to npm; the version lives in `package.json`) |
 | Built artifact id | hardcoded `dsh-code-nav` | injected by `scripts/build.mjs` from `package.json`, so a rename cannot drift; the build also checks top-level name collisions, un-stripped import/export, the export surface vs. template usage, and that the artifact contains every source line verbatim |
 | `<style>` ownership tag | — | keyed by the **full package name** in `data-plugin` (fixed in v0.2.1): client-modules reclaims styles by package name on uninstall / hot-replace, so a short name leaks the `<style>` and stale styling bleeds into the UI |
 | Everything else (highlighting / outline / search) | as above | **no difference from upstream** |
@@ -130,14 +141,15 @@ Non-code files (markdown / images / pdf …) keep using the built-in viewers.
 
 ```sh
 npm run build           # = node scripts/build.mjs, inlines src/*.js into lib/client.js
-npm test               # = node --check lib/client.js && node test/code-nav.test.mjs
-npm run release        # release rehearsal (--dry-run: no git writes, no network requests)
+npm run check           # = node --check lib/client.js && node --check lib/index.js
+npm test                # = the two checks above + node --test (discovers every file under test/)
+npm run release         # release rehearsal (--dry-run: no git writes, no network requests)
 ```
 
 `lib/client.js` is a **generated artifact**: after touching `src/**` or `scripts/client.template.js`
 you must re-run `npm run build`, otherwise the unit test that compares the committed bundle
 byte-for-byte against a fresh build fails (so does CI). There are no third-party dependencies —
-everything is plain node. `test/code-nav.test.mjs` holds the pure-logic unit tests (117 cases: tokenizer + per-language outline + config formats + search + render window + selection payload + build guards + release-script derivation + style ownership); one of them counts the `test()` declarations in that file and compares them with both READMEs, so adding a test and forgetting to update the docs fails loudly.
+everything is plain node. `test/` holds the pure-logic unit tests (307 cases: tokenizer + per-language outline + config formats + search + render window + selection payload + draft coordinates + quote-chip runtime + view-derived state + build/release guards); one of them counts the `test()` declarations across every `test/*.test.mjs` and compares them with both READMEs, so adding a test and forgetting to update the docs fails loudly.
 
 - `src/lang-registry.js` — extension map + language metadata (keywords / comment syntax / string quotes / config colouring directives)
 - `src/properties-key.js` — Java properties key scanning + unescaping rules (shared by outline **and** highlighting so the two cannot drift apart)
@@ -146,23 +158,29 @@ everything is plain node. `test/code-nav.test.mjs` holds the pure-logic unit tes
 - `src/outline.js` — brace-depth / indent driven outline parser (Allman brace-on-next-line style supported; Vue / Svelte extract every `<script>` block and re-add line offsets; the 500-symbol cap is applied here)
 - `src/search.js` — in-file matching (literal substrings, positions always in original-text coordinates) + token×match span merging; 2000-match cap
 - `src/render-window.js` — render window (20,000-line cap): find and outline share one clipping rule, so everything listed is jumpable
-- `src/selection.js` — selection → draft payload (`relative/path:start[-end]` fence; over-long selections keep the path line only)
-- `scripts/client.template.js` — React preview component template (pure modules injected at build time; owns the selection popup and the draft insert)
+- `src/selection.js` — selection → draft payload (fenced `relative/path:start[-end]` block / chip label / clipboard projection; over-long selections keep the path line only)
+- `src/draft-coords.js` — pure conversion between the draft's two projections: clipboard → detect (each reference chip folds to one U+FFFC), plus the separator-space decision before the insertion point
+- `scripts/client.template.js` — React preview component template (pure modules injected at build time; owns the selection popup, the quote chip's input-trigger source / self-contained ref codec, and the landing flash)
 - `scripts/build.mjs` — the inliner plus four build-time checks: top-level name collisions (the later declaration silently wins), import/export the stripper cannot remove (a syntax error once inlined), export surface vs. `__cn.*` usage in the template, and **every source line present verbatim in the artifact** — inlining must use function-form `replace`, because the string form expands `$&` / `` $` `` / `$'` inside the replacement text and rewrites the artifact while still passing `node --check`
 - `scripts/release-config.mjs` — repo / version / asset-name derivation shared by the release scripts (always from `package.json`, never hardcoded), idempotent tag / asset decisions, and `readGithubToken()`
 
 ## Release and CI
 
 ```sh
-node scripts/release-code-nav.mjs --dry-run   # print the plan only: repo / tag / artifact, no git writes, no requests
-node scripts/release-code-nav.mjs             # create repo (if missing) → push → tag → release → upload tgz
-node scripts/release-code-nav.mjs --yes       # allow creating the repo when it does not exist (a 404 can also mean "exists, token cannot see it")
+node scripts/release-code-nav.mjs --dry-run   # print the plan only (incl. artifact freshness): no git writes, no requests
+node scripts/release-code-nav.mjs --yes       # real release: create repo (if missing) → push → tag → release → upload tgz
 node scripts/pr-better-sidebar.mjs --dry-run  # rehearse the upstream PR flow (exits before token / clone / commit / push)
 node scripts/repo-topics.mjs [topic...]       # merge-style topics for this repo (target repo likewise derived from package.json)
 ```
 
+A bare invocation (neither `--dry-run` nor `--yes`) only prints the usage and exits 1: `--yes` is the single
+switch for a live release (it may create a public repo when the target does not exist, so read the plan first).
+
 Safety boundaries (implemented in the scripts and pinned by unit tests): the target repo / version /
-tag / asset name are always derived from `package.json`; an existing tag pointing at another commit is
+tag / asset name are always derived from `package.json`; before fetching a token, pushing or tagging, a live
+release runs the full test suite and verifies that **the tarball matches this tree**
+(`package/lib/client.js` must equal a fresh build of the current sources and `package/package.json` must carry
+this version) — editing code after `npm pack` fails here instead of uploading a stale package; an existing tag pointing at another commit is
 **refused** — nothing is overwritten, force-pushed or `git reset --hard`-ed; release assets are decided
 by digest (skip vs. replace) so re-running a publish never fails; the GitHub token is fetched
 in-process through `git credential fill` and is **kept in memory only — never logged, never written to
@@ -170,8 +188,10 @@ disk** (on failure you get "unable to obtain a GitHub token from the git credent
 dumped git error object).
 
 `.github/workflows/ci.yml` runs on push / PR: `node scripts/build.mjs` → `node --check lib/client.js` →
-the unit tests → `git diff --exit-code -- lib/client.js` (the artifact must be committed and in sync
-with the sources) → `npm pack` + the release rehearsal.
+the unit tests (`npm test`, which also syntax-checks the `lib/index.js` entry and runs every test file via
+`node --test`) → `node scripts/verify-pack.mjs` (packed contents non-empty, all required files present)
+→ `git diff --exit-code -- lib/client.js` (the artifact must be committed and in sync with the sources) →
+`npm pack` + the release rehearsal.
 
 > The registration id in `lib/client.js` is injected by `scripts/build.mjs` from the `name` in `package.json` — client-modules keys its module table by the **full package name**, so a rename must be followed by a rebuild or the browser reports `loaded without registering "<id>"`.
 
@@ -179,10 +199,12 @@ with the sources) → `npm pack` + the release rehearsal.
 
 - Highlighting and outline are lightweight regex / hand-written scanners, not compiler-grade (complex generics, macros, template metaprogramming may be missed or misdetected)
 - Preview takeover is **read-only**; disable the plugin in better-sidebar settings to get the built-in editor back
-- "Add to conversation" resolves the path relative to the session cwd; the plain-text fallback view (no line containers, e.g. a 500KB-truncated file) carries no line numbers
-- Single-file content cap 500KB (matches host truncation; a notice is shown beyond it)
+- "Add to conversation" resolves the path relative to the session cwd; the plain-text fallback view (no line containers) carries no line numbers
+- A new chip's quote payload lives in the chip's own ref (`cnq1:` + JSON: path / line span / display label / open target) and is **never written to `localStorage`** — a refresh, another tab or cleared site data cannot kill it. Only legacy `q…` records still resolve from `dsh-code-nav:quote-refs` (read-only); those old chips go stale after site data is cleared — clicking asks you to select the text again, and the host blocks the send instead of silently sending wrong text
+- Click-through + line flash need better-sidebar 0.30.0+ to hand `line` / `lineEnd` to the viewer; older better-sidebar versions still get the chip and the correct send-time expansion, but a click only opens the file without landing. Hosts with no chip channel (`inputTriggers`) fall back along the chain: this plugin's own plain-text chip (`codeNavQuoteText`, still a compact chip that expands verbatim on send) → inserting the fenced block directly
+- File size is decided by the host: better-sidebar 0.30 hands the preview the content of text files up to **5 MB**; larger files arrive as `largeFile` metadata only (no content), and this plugin shows the size plus a "too large for the inline preview" notice — no paged preview or download
 - At most the first **20,000 lines** of a file are rendered (DOM-size guard). Beyond that, find and outline cover **only the rendered lines** and a notice is shown at the top — matches outside the window are not counted in `n/m` and their symbols are not listed, so nothing is ever reported that cannot be jumped to
-- Two further caps are also stated in the UI: search returns at most **2,000** matches (the counter shows `2000+`) and the outline lists at most **500** symbols ("Too many symbols — listing the first 500")
+- Three caps are always stated in the UI: content beyond **500 KB per file** is not parsed (a top notice says it was truncated to the first 500 KB, and the `total N lines` figure uses the full file), search returns at most **2,000** matches (the counter shows `2000+`), and the outline lists at most **500** symbols ("Too many symbols — listing the first 500")
 - Search matches **literal substrings**, not regular expressions: `.`, `*`, `(`, `\` are themselves, so there is nothing to learn and no unbalanced-parenthesis error — the trade-off is no pattern matching
 - Outline names are capped at 80 characters (code and config formats alike): longer candidates are treated as misparses and dropped, so a whole line can never be rendered as a "name"
 - Vue / Svelte highlight the JS/TS inside each `<script>` block; template sections are not highlighted. Several blocks in one file (`<script>` plus `<script setup>`) are all parsed, with symbol lines mapped back to the original file

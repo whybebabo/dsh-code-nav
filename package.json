@@ -1,14 +1,15 @@
 {
   "name": "@whybebabo/dsh-code-nav",
-  "version": "0.3.0",
-  "description": "DSH web plugin (dsh-better-sidebar companion): code and config file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable, JSON/YAML/TOML/XML keys), in-file search and selection -> add to conversation. Fork of AnakinCao/dsh-code-nav.",
+  "version": "0.4.0",
+  "description": "DSH web plugin (dsh-better-sidebar companion): code and config file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable, JSON/YAML/TOML/XML keys), in-file search and selection -> clickable quote chip in the conversation.",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
     "build": "node scripts/build.mjs",
-    "check": "node --check lib/client.js",
-    "test": "node --check lib/client.js && node test/code-nav.test.mjs",
+    "check": "node --check lib/client.js && node --check lib/index.js",
+    "test": "node --check lib/client.js && node --check lib/index.js && node --test",
     "prepack": "node scripts/build.mjs",
+    "prepublishOnly": "npm test",
     "release": "node scripts/release-code-nav.mjs --dry-run"
   },
   "repository": {
@@ -33,6 +34,9 @@
   ],
   "publishConfig": {
     "access": "public"
+  },
+  "engines": {
+    "node": ">=22"
   },
   "dsh": {
     "bundle": {

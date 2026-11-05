@@ -1,0 +1,8 @@
+# The generated client bundle must be byte-identical on every OS: CI rebuilds it
+# and refuses a diff, so a CRLF checkout would make the product look stale.
+# Store/check out text as LF everywhere; the build also normalises CRLF→LF on
+# read (scripts/build.mjs) so an existing CRLF worktree still builds correctly.
+* text=auto eol=lf
+
+# Snapshot archives are opaque binaries.
+*.tgz binary
