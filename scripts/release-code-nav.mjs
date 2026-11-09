@@ -9,6 +9,9 @@
 //   node scripts/release-code-nav.mjs --yes         # 真正发布（live 必须显式 --yes）
 //   可选：--remote <name>  指定推送用 remote（默认自动匹配派生仓库）
 //         --allow-dirty   允许工作区有未提交改动
+//         --notes-file <path>  用这份 Markdown 作为 Release 正文（标题取自首个
+//                          标题行；已存在的 Release 会同步更新正文/标题）
+//         --title <text>       显式指定 Release 标题（覆盖 notes 推导值）
 //   不带 --dry-run / --yes 时**什么也不做**并打印用法（退出 1）——
 //   这两个开关是「只读计划」与「真的推送」之间的显式分界，不靠隐式默认。
 //   另：仅当 GitHub 报告目标仓库不存在（404）、需要脚本**新建公开仓库**时，
@@ -22,7 +25,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { readPkg, repoOf, tagOf, tgzNameOf, tgzPathOf, isSameRepo, redactRemoteUrl, decideTagAction, parseRemoteTagCommit, decideAssetAction, readGithubToken, countTests, runNpm, checkArtifactFreshness, ROOT } from "./release-config.mjs";
+import { readPkg, repoOf, tagOf, tgzNameOf, tgzPathOf, isSameRepo, redactRemoteUrl, decideTagAction, parseRemoteTagCommit, decideAssetAction, readGithubToken, countTests, runNpm, checkArtifactFreshness, releaseTitleFromNotes, ROOT } from "./release-config.mjs";
 import { buildBundle } from "./build.mjs";
 
 const argv = process.argv.slice(2);
@@ -34,6 +37,17 @@ const ALLOW_DIRTY = argv.includes("--allow-dirty");
 const YES = argv.includes("--yes");
 const remoteFlagIdx = argv.indexOf("--remote");
 const REMOTE_FLAG = remoteFlagIdx >= 0 ? argv[remoteFlagIdx + 1] : null;
+const notesFlagIdx = argv.indexOf("--notes-file");
+const NOTES_FLAG = notesFlagIdx >= 0 ? argv[notesFlagIdx + 1] : null;
+const titleFlagIdx = argv.indexOf("--title");
+const TITLE_FLAG = titleFlagIdx >= 0 ? argv[titleFlagIdx + 1] : null;
+
+if ((notesFlagIdx >= 0 && (NOTES_FLAG === null || NOTES_FLAG.startsWith("--")))
+  || (titleFlagIdx >= 0 && (TITLE_FLAG === null || TITLE_FLAG.startsWith("--")))) {
+  console.error("[release] --notes-file / --title 后需要一个值。");
+  console.error("[release] 本次未推送、未打 tag、未创建 Release。");
+  process.exit(1);
+}
 
 if (!DRY && !YES) {
   console.error("[release] 缺少动作标志：--dry-run（只打印计划）或 --yes（真正发布）。");
@@ -98,6 +112,31 @@ if (!hasArtifact) {
   console.error("[release] 请先运行 `npm pack`（会生成 " + TGZ_NAME + "），再重跑本脚本。");
   console.error("[release] 本次未推送、未打 tag、未创建 Release。");
   process.exit(1);
+}
+
+// 可选的发布说明：本地文件，必须在任何远端写之前读入并校验，避免走到
+// 「tag 已推、Release 才因为文件不存在而失败」。标题默认取正文第一个标题行。
+let RELEASE_NOTES = null;
+if (NOTES_FLAG !== null) {
+  try {
+    RELEASE_NOTES = readFileSync(NOTES_FLAG, "utf8").replace(/^\uFEFF/, "").trim();
+  } catch (error) {
+    console.error("[release] 无法读取 --notes-file：" + NOTES_FLAG);
+    console.error("[release]   " + String(error && error.message ? error.message : error));
+    console.error("[release] 本次未推送、未打 tag、未创建 Release。");
+    process.exit(1);
+  }
+  if (RELEASE_NOTES === "") {
+    console.error("[release] --notes-file 是空文件：" + NOTES_FLAG);
+    console.error("[release] 本次未推送、未打 tag、未创建 Release。");
+    process.exit(1);
+  }
+}
+const RELEASE_TITLE = TITLE_FLAG !== null
+  ? TITLE_FLAG.trim()
+  : (RELEASE_NOTES !== null ? releaseTitleFromNotes(RELEASE_NOTES, TAG) : TAG);
+if (RELEASE_NOTES !== null) {
+  console.log("  notes     :", NOTES_FLAG, "->", RELEASE_TITLE);
 }
 
 // 推送目标：只用**已存在且指向派生仓库**的 remote，绝不静默改写用户的 remote 配置
@@ -300,7 +339,7 @@ if (tagAction.action === "reuse") {
 // 7) release（幂等：tag 已有 release 则复用）
 // 正文里的数字同样派生，避免又一处「文档写 25/25 实际 72/72」式的过期。
 const testCount = countTests();
-const body = [
+const fallbackBody = [
   "## " + TAG,
   "",
   "**" + pkg.name + "** — " + pkg.description,
@@ -325,21 +364,37 @@ const body = [
     : "- `npm test` — " + testCount + "/" + testCount + " unit tests pass",
   "- `node --check lib/client.js` — bundle syntax OK",
 ].join("\n");
+const releaseBody = RELEASE_NOTES !== null ? RELEASE_NOTES : fallbackBody;
+const wantsMetaUpdate = RELEASE_NOTES !== null || TITLE_FLAG !== null;
 let releaseId;
 {
   const existing = await GH("/repos/" + REPO + "/releases/tags/" + TAG);
   if (existing.ok) {
     const d = await existing.json();
     releaseId = d.id;
-    console.log("RELEASE EXISTS:", d.html_url);
+    if (wantsMetaUpdate) {
+      // 幂等重跑时同步正文 / 标题；只重发资产时不动已有 Release 内容。
+      const patched = await GH("/repos/" + REPO + "/releases/" + releaseId, {
+        method: "PATCH",
+        body: JSON.stringify({ name: RELEASE_TITLE, body: releaseBody }),
+      });
+      const pd = await patched.json();
+      if (!patched.ok) {
+        console.error("release update failed", patched.status, pd.message || "", pd.errors || "");
+        process.exit(1);
+      }
+      console.log("RELEASE UPDATED:", pd.html_url);
+    } else {
+      console.log("RELEASE EXISTS:", d.html_url);
+    }
   } else {
     const rel = await GH("/repos/" + REPO + "/releases", {
       method: "POST",
       body: JSON.stringify({
         tag_name: TAG,
         target_commitish: branch,
-        name: TAG,
-        body,
+        name: RELEASE_TITLE,
+        body: releaseBody,
         draft: false,
         prerelease: false,
       }),

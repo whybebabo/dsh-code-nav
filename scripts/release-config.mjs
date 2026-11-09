@@ -644,3 +644,28 @@ export function parseRemoteTagCommit(stdout, tag) {
   }
   return peeled ?? plain;
 }
+
+/**
+ * 从发布说明正文里推导 Release 标题：取第一个 Markdown 标题（`#` … `######`），
+ * 去掉井号；没有标题时回退到调用方给的 fallback（通常是 tag）。
+ *
+ * better-workspace 的 Release 标题形如 `v0.1.10 — 一句话总结`，正文第一行是
+ * 同名 `##` 标题。让脚本从 notes 文件推导标题，发布时就不会出现「正文很完整、
+ * 标题仍只有 tag」的半成品；需要覆盖时仍可用 `--title` 显式指定。
+ *
+ * @param {unknown} notes 发布说明 Markdown
+ * @param {string} [fallback]
+ * @returns {string}
+ */
+export function releaseTitleFromNotes(notes, fallback = "") {
+  if (typeof notes !== "string") return typeof fallback === "string" ? fallback.trim() : "";
+  for (const line of notes.split(/\r?\n/)) {
+    const text = line.trim();
+    const match = /^#{1,6}\s+(.+)$/.exec(text);
+    if (match !== null) {
+      const title = match[1].trim();
+      if (title !== "") return title;
+    }
+  }
+  return typeof fallback === "string" ? fallback.trim() : "";
+}

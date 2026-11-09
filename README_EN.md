@@ -166,7 +166,7 @@ npm run release         # release rehearsal (--dry-run: no git writes, no networ
 `lib/client.js` is a **generated artifact**: after touching `src/**` or `scripts/client.template.js`
 you must re-run `npm run build`, otherwise the unit test that compares the committed bundle
 byte-for-byte against a fresh build fails (so does CI). There are no third-party dependencies —
-everything is plain node. `test/` holds the pure-logic unit tests (394 cases: tokenizer + per-language outline + config formats + search + whole-file scanning + render window + virtual-scroll row window + file chunking + selection payload + draft coordinates + quote-chip runtime + view-derived state + build/release guards); one of them counts the `test()` declarations across every `test/*.test.mjs` and compares them with both READMEs, so adding a test and forgetting to update the docs fails loudly.
+everything is plain node. `test/` holds the pure-logic unit tests (395 cases: tokenizer + per-language outline + config formats + search + whole-file scanning + render window + virtual-scroll row window + file chunking + selection payload + draft coordinates + quote-chip runtime + view-derived state + build/release guards); one of them counts the `test()` declarations across every `test/*.test.mjs` and compares them with both READMEs, so adding a test and forgetting to update the docs fails loudly.
 
 - `src/lang-registry.js` — extension map + language metadata (keywords / comment syntax / string quotes / config colouring directives)
 - `src/properties-key.js` — Java properties key scanning + unescaping rules (shared by outline **and** highlighting so the two cannot drift apart)
@@ -188,6 +188,9 @@ everything is plain node. `test/` holds the pure-logic unit tests (394 cases: to
 ```sh
 node scripts/release-code-nav.mjs --dry-run   # print the plan only (incl. artifact freshness): no git writes, no requests
 node scripts/release-code-nav.mjs --yes       # real release: create repo (if missing) → push → tag → release → upload tgz
+node scripts/release-code-nav.mjs --yes --notes-file release-notes/v0.5.0.md
+                                             # the Markdown becomes the release body; its first heading is the title
+                                             # (override with --title); an existing release is updated in place
 node scripts/pr-better-sidebar.mjs --dry-run  # rehearse the upstream PR flow (exits before token / clone / commit / push)
 node scripts/repo-topics.mjs [topic...]       # merge-style topics for this repo (target repo likewise derived from package.json)
 ```

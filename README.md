@@ -153,7 +153,7 @@ npm run release        # 发布演练（--dry-run，不写 git、不发网络请
 
 `lib/client.js` 是**产物**，改了 `src/**` 或 `scripts/client.template.js` 都必须重新 `npm run build`，
 否则单测里的「产物 == 源码」逐字比对会失败（CI 同样会失败）。无第三方依赖，全程只用 node。
-`test/` 下是纯逻辑单测（394 例：分词 + 各语言大纲 + 配置格式 + 查找 + 全文扫描 + 渲染窗口 + 虚拟滚动窗口 + 文件分块 + 选区载荷 + 草稿坐标 + 引用 chip 运行时 + 视图派生状态 + 构建/发布校验），
+`test/` 下是纯逻辑单测（395 例：分词 + 各语言大纲 + 配置格式 + 查找 + 全文扫描 + 渲染窗口 + 虚拟滚动窗口 + 文件分块 + 选区载荷 + 草稿坐标 + 引用 chip 运行时 + 视图派生状态 + 构建/发布校验），
 其中一例会数 `test/` 下所有测试文件的 `test()` 数量并与两份 README 对齐 —— 加测试却忘改文档会直接失败。
 
 - `src/lang-registry.js` —— 扩展名映射 + 语言元数据（关键字 / 注释语法 / 字符串引号 / 配置格式的上色指令）
@@ -176,6 +176,9 @@ npm run release        # 发布演练（--dry-run，不写 git、不发网络请
 ```sh
 node scripts/release-code-nav.mjs --dry-run   # 只打印计划（含产物新鲜度），不写 git、不发请求
 node scripts/release-code-nav.mjs --yes       # 真正发布：建仓(如缺) → push → tag → release → 上传 tgz
+node scripts/release-code-nav.mjs --yes --notes-file release-notes/v0.5.0.md
+                                             # Release 正文来自该 Markdown；标题取首个标题行
+                                             # （可用 --title 覆盖），已存在的 Release 会同步更新
 node scripts/pr-better-sidebar.mjs --dry-run  # 上游 PR 流程演练（取 token / clone / commit / push 之前就会退出）
 node scripts/repo-topics.mjs [topic...]       # 合并式设置本仓库 topics（目标仓库同样从 package.json 派生）
 ```

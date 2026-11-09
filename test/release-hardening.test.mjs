@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { REQUIRED_FILES, parsePackJson, verifyPackJson } from "../scripts/verify-pack.mjs";
 import { DEFAULT_TOPICS, mergeTopics, parseArgs } from "../scripts/repo-topics.mjs";
 import { decidePrAction, explainPrCreateFailure, cloneOriginMatchesUpstream } from "../scripts/pr-better-sidebar.mjs";
-import { npmInvocation, readTgzEntry, checkArtifactFreshness } from "../scripts/release-config.mjs";
+import { npmInvocation, readTgzEntry, checkArtifactFreshness, releaseTitleFromNotes } from "../scripts/release-config.mjs";
 
 const SCRIPT_DIR = fileURLToPath(new URL("../scripts/", import.meta.url));
 
@@ -423,4 +423,13 @@ test("release: live path runs npm test before credentials or any remote write", 
   assert.ok(testGate < code.indexOf('"push", "-u"'), "npm test 必须在 push 之前");
   assert.ok(!code.includes('"--skip-tests"'), "不得提供 --skip-tests 逃生阀");
   assert.ok(!code.includes('includes("--skip-tests")'), "不得解析 --skip-tests");
+});
+
+test("release notes: the title derives from the first markdown heading", () => {
+  assert.equal(releaseTitleFromNotes("## v0.5.0 — large files\n\nbody", "v0.5.0"), "v0.5.0 — large files");
+  assert.equal(releaseTitleFromNotes("# Just a title\n", "v0.1.0"), "Just a title");
+  assert.equal(releaseTitleFromNotes("body without a heading", "v0.1.0"), "v0.1.0");
+  assert.equal(releaseTitleFromNotes(null, "v0.1.0"), "v0.1.0");
+  assert.equal(releaseTitleFromNotes("", ""), "");
+  assert.equal(releaseTitleFromNotes("###\n", "fallback"), "fallback");
 });
