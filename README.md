@@ -4,10 +4,10 @@
 
 > **这是 [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav) 的 fork。**
 > 上游目前未发布到 npm，本 fork 补上了「选中文字 → 添加到对话」（v0.1.2 起）、
-> **常见配置文件支持**（v0.2.0 起）、**Protocol Buffers 支持**（v0.3.0 起）与
-> **可点击的引用 chip**（v0.4.0 起），并以
+> **常见配置文件支持**（v0.2.0 起）、**Protocol Buffers 支持**（v0.3.0 起）、
+> **可点击的引用 chip**（v0.4.0 起）与**大文件分块 / 分页预览**（v0.5.0 起），并以
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
-> 发布到 npm（当前版本 **0.4.0**；本版发布前 registry 上的最新版仍是 0.3.0）。
+> 发布到 npm（当前版本 **0.5.0**；npm 上此前的最新版是 0.4.0）。
 > 差异见下方[**Fork 说明**](#fork-说明)；v0.1.2 的改动已作为 PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 提交上游。
 
@@ -44,7 +44,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 已经装过本插件时，请**指定精确版本**，不要只依赖 `^` 范围（版本号见上方「当前版本」或 `npm view @whybebabo/dsh-code-nav version`）：
 
 ```
-@whybebabo/dsh-code-nav@0.4.0
+@whybebabo/dsh-code-nav@0.5.0
 ```
 
 原因：pnpm 11 的供应链防护默认值 `minimumReleaseAge: 1440` 表示"发布满 24 小时的版本才优先安装"。由于这是**内置默认值**（非显式配置），`minimumReleaseAgeStrict` 默认为 `false` —— pnpm 不会报错，而是退回安装一个"够老"的版本。于是已装 0.1.1 的人再执行 `^0.1.1`，pnpm 会认为 0.1.1 够老、新版本太新，**命令显示成功、版本却停在原地**。
@@ -76,6 +76,16 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 > 刷新 / 换标签页 / 清空站点数据都不会把 chip 变死；宿主没有 chip 通道（旧版 DSH /
 > 没有 `inputTriggers`）时回退到本插件自带的纯文本 chip，再回退为直接插入围栏块，
 > 能力不丢失。
+>
+> 0.5.0 是**大文件版**：不再受 500 KB 限制 —— ≤5 MB 按 **256 KiB** 分块加载（首屏
+> 2 块，滚动近底自动续读），>5 MB 走宿主 `fs.readPage` 只读分页（**128 KiB / 页**，
+> 单行超过一页时把连续页拼回整行），行号全局连续；DOM 只挂视口附近的行（虚拟滚动，
+> 视口外按行高占位），8k+ 行文件打开/滚动不再卡死；查找覆盖**整个文件**（≤5 MB 搜
+> 内存正文，>5 MB 后台按页扫描，64 MB 预算），命中行未加载时按 Enter / 下一个会自动
+> 续读再跳转；默认 **50,000 行**软上限可点「加载全部（解除上限）」读到文件末尾；
+> 超长单行（>8,000 字符或 >500 段）关闭逐 token 高亮以保证滚动流畅。同时修复分页
+> 长行拼接、跨块分词状态、Kotlin `enum class`、上限解除入口、冻结输入框插入等
+> 正确性问题。
 
 ## Fork 说明
 
@@ -83,9 +93,9 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 
 **为什么 fork**：上游以 `priority: 10` 注册预览器，`.ts` 等扩展名被它接管后，内置 `TextEditor` 不再挂载 —— 而 better-sidebar 的「选中文字 → 添加到对话」浮层只实现在 `TextEditor` 内部，`betterSidebar` 服务面也没有任何选区 / 浮层 / 草稿 API，导致这些文件直接失去该能力。上游暂无此功能，且有本地使用需求。
 
-**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持；v0.2.1 修样式归属；v0.2.2 修正确性并加固构建/发布链路；v0.3.0 新增 Protocol Buffers；v0.4.0 引用 chip 可点击）：
+**相对上游的差异**（v0.1.2 的改动即 PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1) 的内容；v0.2.0 追加配置文件支持；v0.2.1 修样式归属；v0.2.2 修正确性并加固构建/发布链路；v0.3.0 新增 Protocol Buffers；v0.4.0 引用 chip 可点击；v0.5.0 大文件分块 / 分页预览）：
 
-| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.4.0` |
+| 项 | 上游 `dsh-code-nav@0.1.0` | 本 fork `@whybebabo/dsh-code-nav@0.5.0` |
 |---|---|---|
 | 选中文字 → 添加到对话 | ❌ 无（接管后该能力消失） | ✅ 选区上方浮层按钮 → 会话输入框里落成一枚引用 chip |
 | 草稿形态 | — | 与 better-sidebar 0.30 同形：`引用 文件 L起-止` 的紧凑 chip；点击跳回源文件并闪烁被引行段 |
@@ -95,6 +105,7 @@ dsh plugin --profile web add @whybebabo/dsh-code-nav
 | 浮层关闭 | — | 沿用 better-sidebar 的关闭契约：外部点击 / Esc / 页面隐藏 / 失焦 / 滚动 / 面板离开视口 |
 | 配置文件支持 | ❌ 无（json / yaml / toml / xml 等落到内置查看器，无高亮与大纲） | ✅ JSON / YAML / TOML / XML / INI / properties / dotenv 的高亮 + 结构大纲 |
 | 新增语言 | ❌ 无 `.proto` | ✅ Protocol Buffers（`.proto`）高亮 + 大纲：message / enum / oneof / 字段 / service / rpc / extend |
+| 大文件预览 | ❌ 500 KB 后截断 | ✅ ≤5 MB 按 256 KiB 分块、>5 MB 走 `fs.readPage` 只读分页；虚拟滚动只挂视口附近行；查找覆盖整个文件；50,000 行软上限可解除 |
 | 大纲 / 查找的正确性 | — | Vue / Svelte 多个 `<script>` 块都解析且行号回加原文坐标；大小写不敏感匹配的行列位置用原文坐标（`toLowerCase()` 后长度变化的字符不再错位）；JSON 键还原 `\uXXXX` 等转义；查找覆盖整个文件（≤5 MB 内存正文 / >5 MB 后台按页扫描，扫描预算 64 MB），上限（默认加载 50,000 行、可手动解除 / 2000 条匹配 / 500 个符号）在界面上说明 |
 | 包名 | `dsh-code-nav` | `@whybebabo/dsh-code-nav`（避免占用上游名称） |
 | 版本 | 0.1.0（未发布 npm） | 0.4.x（发布到 npm；版本号以 `package.json` 为准） |

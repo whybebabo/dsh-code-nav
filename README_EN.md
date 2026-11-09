@@ -3,9 +3,10 @@
 > **This is a fork of [AnakinCao/dsh-code-nav](https://github.com/AnakinCao/dsh-code-nav).**
 > Upstream is not published to npm; this fork adds "selection → add to conversation"
 > (since v0.1.2), **common config-file support** (since v0.2.0), **Protocol Buffers
-> support** (since v0.3.0) and a **clickable quote chip** (since v0.4.0), published to npm as
+> support** (since v0.3.0), a **clickable quote chip** (since v0.4.0) and **chunked /
+> paged large-file preview** (since v0.5.0), published to npm as
 > [`@whybebabo/dsh-code-nav`](https://www.npmjs.com/package/@whybebabo/dsh-code-nav)
-> (current version **0.4.0**; until this version is published the registry still serves 0.3.0).
+> (current version **0.5.0**; the previous registry version is 0.4.0).
 > See [**Fork notes**](#fork-notes) below; the v0.1.2 change is open upstream as PR
 > [AnakinCao/dsh-code-nav#1](https://github.com/AnakinCao/dsh-code-nav/pull/1).
 
@@ -42,7 +43,7 @@ Then **restart `dsh web`** (a new bundle needs a host-side reload) and **hard-re
 Name an **exact** version instead of relying only on the `^` range (take the number from the banner above, or `npm view @whybebabo/dsh-code-nav version`):
 
 ```
-@whybebabo/dsh-code-nav@0.4.0
+@whybebabo/dsh-code-nav@0.5.0
 ```
 
 pnpm 11's supply-chain guard defaults to `minimumReleaseAge: 1440`, i.e. only versions published at least 24 hours ago are preferred. Because that is a **built-in default** rather than an explicit setting, `minimumReleaseAgeStrict` defaults to `false`: pnpm does not fail, it falls back to a version old enough to satisfy the age gate. So with `^0.1.1` still recorded, installing again resolves 0.1.1 (mature) over a newer release (too new) and **reports success while the installed version never changes**.
@@ -83,6 +84,20 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 > so a refresh, another tab or clearing site data cannot kill the chip. Hosts without a
 > chip channel (older DSH, no `inputTriggers`) fall back to this plugin's own plain-text
 > chip and then to inserting the fenced block directly, so the capability is never lost.
+>
+> 0.5.0 is the **large-file release**: the plugin no longer stops at 500 KB — files up to
+> 5 MB load in **256 KiB** chunks (two on first paint, more on scroll), files above 5 MB
+> use the host's read-only `fs.readPage` paging (**128 KiB** pages, stitching cross-page
+> half-lines back into one line), with file-global line numbers; only rows near the
+> viewport are mounted (virtual scrolling; spacer rows keep the scroll height), so
+> opening or scrolling an 8k+-line file no longer freezes. Search covers the **whole
+> file** (in-memory text ≤5 MB, background page scan with a 64 MB budget above), and
+> Enter / Next reads chunks on demand to reach a match that is not loaded yet. The
+> default **50,000-line** soft cap can be lifted with **Load all (lift cap)**, and
+> over-long lines (>8,000 chars or >500 segments) render as plain text to keep scrolling
+> responsive. This release also fixes cross-page long-line alignment, cross-chunk
+> tokenizer state, Kotlin `enum class` names, the cap-at-EOF escape hatch, and inserting
+> into a frozen composer.
 
 ## Fork notes
 
@@ -90,9 +105,9 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 
 **Why fork**: upstream registers its viewer with `priority: 10`, so for the extensions it handles the built-in `TextEditor` never mounts — and better-sidebar's "selection → add to conversation" popup lives inside `TextEditor` only, while the `betterSidebar` service exposes no selection / popup / draft API at all. Those files therefore lose the capability outright. Upstream has no such feature and there was a local need for it.
 
-**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support; v0.2.1 fixes style ownership; v0.2.2 fixes correctness and hardens the build / release pipeline; v0.3.0 adds Protocol Buffers; v0.4.0 makes the quote chip clickable):
+**Differences from upstream** (v0.1.2 is the content of PR [#1](https://github.com/AnakinCao/dsh-code-nav/pull/1); v0.2.0 adds config-file support; v0.2.1 fixes style ownership; v0.2.2 fixes correctness and hardens the build / release pipeline; v0.3.0 adds Protocol Buffers; v0.4.0 makes the quote chip clickable; v0.5.0 adds chunked / paged large-file preview):
 
-| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.4.0` |
+| | upstream `dsh-code-nav@0.1.0` | this fork `@whybebabo/dsh-code-nav@0.5.0` |
 |---|---|---|
 | Selection → add to conversation | ❌ absent (lost once the viewer takes over) | ✅ floating button above the selection → a quote chip in the composer |
 | Draft shape | — | same shape as better-sidebar 0.30: a compact `Quote <file> Lstart[-end]` chip; clicking it jumps back to the source file and flashes the quoted lines |
@@ -102,6 +117,7 @@ Naming an exact version leaves a single candidate in range, which pnpm installs 
 | Popup dismissal | — | same contract as better-sidebar: outside mousedown / Escape / hidden document / blur / scroll / surface leaving the viewport |
 | Config-file support | ❌ none (json / yaml / toml / xml … fall to the built-in viewer, no highlighting or outline) | ✅ highlighting + structural outline for JSON / YAML / TOML / XML / INI / properties / dotenv |
 | Added language | ❌ no `.proto` | ✅ Protocol Buffers (`.proto`): highlighting + outline for message / enum / enum value / oneof / field / service / rpc / extend |
+| Large-file preview | ❌ truncated after 500 KB | ✅ 256 KiB chunks up to 5 MB, read-only `fs.readPage` paging above; virtual-scrolled rows; whole-file search; liftable 50,000-line soft cap |
 | Outline / search correctness | — | every `<script>` block of a Vue / Svelte file is parsed with line numbers mapped back to the original file; case-insensitive matches report original-text coordinates (characters whose lowercase form changes length no longer shift positions); JSON keys are unescaped (`\uXXXX` etc.); the caps (50,000 lines by default, liftable / 2000 matches / 500 symbols) are surfaced in the UI |
 | Package name | `dsh-code-nav` | `@whybebabo/dsh-code-nav` (avoids claiming the upstream name) |
 | Version | 0.1.0 (not on npm) | 0.4.x (published to npm; the version lives in `package.json`) |

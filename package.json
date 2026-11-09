@@ -1,7 +1,7 @@
 {
   "name": "@whybebabo/dsh-code-nav",
-  "version": "0.4.0",
-  "description": "DSH web plugin (dsh-better-sidebar companion): code and config file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable, JSON/YAML/TOML/XML keys), in-file search and selection -> clickable quote chip in the conversation.",
+  "version": "0.5.0",
+  "description": "DSH web plugin (dsh-better-sidebar companion): code and config file preview with per-language syntax highlighting, symbol outline navigation (class / method / variable, JSON/YAML/TOML/XML keys), whole-file search, chunked/paged large-file preview, and selection -> clickable quote chip in the conversation.",
   "type": "module",
   "main": "lib/index.js",
   "scripts": {
