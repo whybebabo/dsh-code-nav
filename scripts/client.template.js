@@ -372,6 +372,48 @@ window.__ModuleLoader__.load({
 		}
 
 		/**
+		 * 冻结相位（宿主 `InputState.phase`）：编辑器在 `adjudicating` / `submitting` /
+		 * `sending` 三个相位下只读（contract/input.ts），只有 `plain` / `claimed`
+		 * 接受编辑。
+		 */
+		const FROZEN_COMPOSER_PHASES = { adjudicating: true, submitting: true, sending: true };
+
+		/**
+		 * 读当前输入面板的相位（接口缺失 / 旧宿主没有 phase 时返回 undefined）。
+		 *
+		 * 只做一次快照读取，不写任何东西：调用方据此决定要不要插入。旧宿主没有
+		 * `phase` 字段，undefined 一律视为「不是冻结相位」，保持既有行为。
+		 * @param {object} ctx 客户端插件上下文
+		 * @param {string} sessionId
+		 * @returns {string|undefined}
+		 */
+		function composerPhaseOf(ctx, sessionId) {
+			try {
+				if (ctx === undefined || ctx === null || typeof sessionId !== "string") return undefined;
+				if (typeof ctx.sessions === "undefined" || ctx.sessions === null) return undefined;
+				const actx = ctx.sessions.scope(sessionId);
+				if (actx === undefined) return undefined;
+				const conversation = typeof ctx.get === "function" ? ctx.get("conversation") : undefined;
+				if (conversation === undefined || conversation === null) return undefined;
+				const input = conversation.input.for(actx);
+				const snapshot = readSnapshot(input);
+				const phase = snapshot === undefined ? undefined : snapshot.phase;
+				return typeof phase === "string" && phase !== "" ? phase : undefined;
+			} catch (error) {
+				return undefined;
+			}
+		}
+
+		/**
+		 * 该相位下编辑器是否只读。
+		 * @param {unknown} phase
+		 * @returns {boolean}
+		 */
+		function composerIsFrozen(phase) {
+			return typeof phase === "string" && FROZEN_COMPOSER_PHASES[phase] === true;
+		}
+
+		/**
 		 * 读当前草稿（clipboard 投影：每个引用 chip 展开成它的 clipboardText）。
 		 * @param {object} input 会话输入面板（SessionInput）
 		 * @returns {string}
@@ -678,6 +720,14 @@ window.__ModuleLoader__.load({
 		 * @returns {boolean} 是否写入成功
 		 */
 		function insertSelection(ctx, sessionId, sel) {
+			// 冻结相位必须在任何写入之前拦下（CLIENT-2）：宿主只给 `insertReference`
+			// 加了相位守卫，`actions.insertText` 与公开事件通道**都没有** —— 否则这里
+			// 会先补一个分隔空格、再把围栏块写进正在发送的草稿，还上报成功。
+			// 先读一次快照（只读操作）；是只读相位就直接拒绝，一个字节都不写。
+			if (composerIsFrozen(composerPhaseOf(ctx, sessionId))) {
+				announceInsertNotice(ctx, sessionId, "error", "selection.insertRefused");
+				return false;
+			}
 			if (insertQuoteChip(ctx, sessionId, sel)) return true;
 			if (insertFallbackChip(ctx, sessionId, sel)) return true;
 			const text = __cn.selectionPayload(sel.path, sel.cwd, sel.lines, sel.text).text;
@@ -1342,6 +1392,7 @@ window.__ModuleLoader__.load({
 			"search.scanning": "正在搜索整个文件…已扫描 {percent}%",
 			"search.scanningBytes": "正在搜索整个文件…已扫描 {mb}",
 			"search.scanCapped": "全文搜索只扫描了前 {mb}：更靠后的匹配未列出（可下载后搜索）",
+			"search.scanHitCap": "全文搜索已找到 {n} 处匹配（达到计数上限）：更靠后的匹配未列出（可下载后搜索）",
 			"search.scanError": "全文搜索读取失败：{message}（已找到的匹配仍可跳转）",
 			"search.pendingJump": "当前匹配在第 {line} 行（已加载 {n} 行）：按 Enter 或「下一个」定位",
 			"search.jumping": "正在读取到第 {line} 行…（已加载 {n} 行）",
@@ -1398,6 +1449,7 @@ window.__ModuleLoader__.load({
 			"search.scanning": "Searching the whole file… {percent}% scanned",
 			"search.scanningBytes": "Searching the whole file… {mb} scanned",
 			"search.scanCapped": "Whole-file search only scanned the first {mb}: later matches are not listed (download the file to search it all)",
+			"search.scanHitCap": "Whole-file search stopped at {n} matches (count cap reached): later matches are not listed (download the file to search it all)",
 			"search.scanError": "Whole-file search failed to read: {message} (matches found so far can still be jumped to)",
 			"search.pendingJump": "This match is on line {line} ({n} lines loaded): press Enter or Next to go there",
 			"search.jumping": "Reading up to line {line}… ({n} lines loaded)",
@@ -1633,32 +1685,113 @@ window.__ModuleLoader__.load({
 			return n;
 		}
 
+		//#region chunk tokenize
 		/**
-		 * 把一块文本切成行 token。
+		 * Vue/Svelte 累计重分词的上限（见 tokenizePiece）。
+		 *
+		 * SFC 的 `<script>` 可以横跨块边界：单块分词看不到块外布局，从第二块起
+		 * 整块会被当成模板（一行都不着色）。因此 SFC 改成「已加载行 + 新块」整体
+		 * 重分词后取尾部；拼接文本超过这个长度就放弃累计（重分词成本随已加载量
+		 * 增长），退回逐块分词 —— 超过 ~500KB 的 SFC 从第二块起 `<script>` 内的
+		 * 行不着色，这是已知退化（与 src/tokenize.js 的 500,000 字符防御上限同量级）。
+		 */
+		const SFC_CUMULATIVE_MAX_CHARS = 500000;
+
+		/** Vue/Svelte 这类「没有块边界」的单文件组件语言。 */
+		function isSfcLang(lang) {
+			return lang === "vue" || lang === "svelte";
+		}
+
+		/**
+		 * 一块文本 → 行 token（行数必须与 piece.lines 严格对齐）。
 		 *
 		 * - 超长单行跳过分词：渲染端本来就会按纯文本渲染，分词只会白烧主线程。
-		 * - 语言未知（tokenizeLines 返回 null）退化为逐行纯文本。
-		 * - 非末页的 raw 以行分隔符结束，tokenize 会多切出一个空行；那是块边界，
-		 *   不是文件里的一行，必须去掉，否则每块的接缝处会多出一行空行。
+		 * - 语言未知（tokenizeLinesWithState 返回 null）退化为逐行纯文本。
+		 * - 块边界多出来的最后一个 token 必须丢掉：非末块的 raw 要么以行分隔符
+		 *   结尾（tokenize 会多切出一个空行），要么以跨页半行结尾（最后那个
+		 *   token 就是那半行）；两者都不是本块的一行。丢错了行号就会从接缝处
+		 *   开始漂（PREVIEW-1）。
+		 * - 分词被 500KB 防御上限截断（行数对不上）时同样退回纯文本：整块不高亮
+		 *   只是观感，少一行会让行号/查找行号/chip 目标全局错位。
+		 * - 跨行分词状态随块传递（`prevState` → 返回的 `state`）：块注释 / 三引号
+		 *   字符串 / XML CDATA 等不会在块边界被重置（PREVIEW-2）。跳过分词或退化
+		 *   成纯文本的块无法推进状态，只能重置为初始状态 —— 那一段的跨行状态会
+		 *   丢一次（超长单行块与截断块都是病态输入，可接受）。
+		 *
 		 * @param {{raw:string, lines:string[], eof:boolean, endsWithBreak:boolean}} piece
 		 * @param {string} lang
-		 * @returns {Array<{raw:string, segs:Array<{text:string, cls:string}>}>}
+		 * @param {object|null} [prevState] 上一块结束时返回的跨行分词状态
+		 * @returns {{lines:Array<{raw:string, segs:Array<{text:string, cls:string}>}>, state:object|null}}
 		 */
-		function tokenizeChunk(piece, lang) {
-			if (piece.raw === "") return [];
+		function tokenizeChunk(piece, lang, prevState) {
+			const expected = piece.lines.length;
+			const inherited = prevState === undefined ? null : prevState;
 			const plain = () => {
 				const out = [];
-				for (let i = 0; i < piece.lines.length; i += 1) out.push({ raw: piece.lines[i], segs: [] });
-				return out;
+				for (let i = 0; i < expected; i += 1) out.push({ raw: piece.lines[i], segs: [] });
+				return { lines: out, state: null };
 			};
+			if (piece.raw === "" || expected === 0) return { lines: [], state: inherited };
 			if (__cn.chunkNeedsPlain(piece.raw)) return plain();
-			const tokens = __cn.tokenizeLines(piece.raw, lang);
-			if (tokens === null) return plain();
-			if (piece.eof !== true && piece.endsWithBreak === true && tokens.length > 0) {
-				return tokens.slice(0, tokens.length - 1);
-			}
-			return tokens;
+			const result = __cn.tokenizeLinesWithState(piece.raw, lang, inherited);
+			const tokens = result === null || result === undefined ? null : result.lines;
+			if (tokens === null || tokens === undefined || tokens.truncated === true) return plain();
+			// 非末块比 piece.lines 多一个边界 token（尾随空行 / 跨页半行）。
+			if (tokens.length !== (piece.eof === true ? expected : expected + 1)) return plain();
+			return {
+				lines: piece.eof === true ? tokens : tokens.slice(0, expected),
+				state: result.state === undefined ? null : result.state
+			};
 		}
+
+		/**
+		 * Vue/Svelte：把「已加载分块的所有原始行 + 本块的整行」拼起来重分词，
+		 * 再取尾部 `piece.lines.length` 行 —— 跨块的 `<script>` 因此也能着色。
+		 * @param {Array<{lines:Array<{raw:string}>}>} chunks 已追加的分块
+		 * @param {{lines:string[]}} piece 本块
+		 * @param {string} lang
+		 * @returns {{lines:Array, state:object|null} | null} null = 超出累计上限 / 行数对不上
+		 */
+		function tokenizeSfcCumulative(chunks, piece, lang) {
+			const parts = [];
+			for (let c = 0; c < chunks.length; c += 1) {
+				const lines = chunks[c].lines;
+				for (let i = 0; i < lines.length; i += 1) parts.push(lines[i].raw);
+			}
+			const tailCount = piece.lines.length;
+			for (let i = 0; i < tailCount; i += 1) parts.push(piece.lines[i]);
+			if (parts.length === 0) return { lines: [], state: null };
+			const text = parts.join("\n");
+			// tokenize 的 500,000 字符上限是「超过才截断」：<= 上限就能拿到完整行数。
+			if (text.length > SFC_CUMULATIVE_MAX_CHARS) return null;
+			const result = __cn.tokenizeLinesWithState(text, lang, null);
+			const tokens = result === null || result === undefined ? null : result.lines;
+			if (tokens === null || tokens === undefined || tokens.truncated === true) return null;
+			if (tokens.length !== parts.length) return null;
+			return { lines: tokens.slice(parts.length - tailCount), state: null };
+		}
+
+		/**
+		 * 追加一块时的分词入口：SFC 走累计重分词，其余语言带着上一块的跨行状态
+		 * 逐块分词（见 tokenizeChunk / tokenizeSfcCumulative）。
+		 * @param {Array<{lines:Array}>} chunks 已追加的分块
+		 * @param {{lines:string[]}} piece 本块
+		 * @param {string} lang
+		 * @returns {{lines:Array, state:object|null}}
+		 */
+		function tokenizePiece(chunks, piece, lang) {
+			const last = chunks.length === 0 ? null : chunks[chunks.length - 1];
+			const prevState = last === null || last.tokenState === undefined || last.tokenState === null
+				? null
+				: last.tokenState;
+			if (piece.lines.length === 0) return { lines: [], state: prevState };
+			if (isSfcLang(lang) && chunks.length > 0) {
+				const cumulative = tokenizeSfcCumulative(chunks, piece, lang);
+				if (cumulative !== null) return cumulative;
+			}
+			return tokenizeChunk(piece, lang, prevState);
+		}
+		//#endregion
 
 		function CodePreviewView(props) {
 			const { ctx, scope, path, title, content, truncated: truncatedProp, size, largeFile, line, lineEnd, onLineConsumed, onToolbarState } = props;
@@ -1746,8 +1879,12 @@ window.__ModuleLoader__.load({
 			const lineCapRef = react.useRef(__cn.MAX_PREVIEW_LINES);
 			const lineCap = capLifted ? Number.MAX_SAFE_INTEGER : __cn.MAX_PREVIEW_LINES;
 			lineCapRef.current = lineCap;
-			/** 读取游标 + 代际：换文件时 gen++，在途响应据此丢弃。 */
-			const pageRef = react.useRef({ gen: 0, offset: 0, inflight: false });
+			/**
+			 * 读取游标 + 代际：换文件时 gen++，在途响应据此丢弃。
+			 * `pending` 是分页态跨页半行（单行 > 128KiB 时宿主返回未裁剪的窗口，
+			 * 见 chunkFromRead）；换文件必须清空，否则上一个文件的半行会被拼进新文件。
+			 */
+			const pageRef = react.useRef({ gen: 0, offset: 0, inflight: false, pending: "" });
 			const loadRef = react.useRef(null);
 			/**
 			 * 分页态的后台全文扫描（只有 >5 MB、宿主只给 `{size, largeFile}` 时用）：
@@ -2007,8 +2144,16 @@ window.__ModuleLoader__.load({
 				return out;
 			}, [chunks]);
 
-			/** 远端读一页（>5MB）：结果与 planChunk 同形状，供同一套加载器消费。 */
-			const readRemotePage = async (offset) => {
+			/**
+			 * 远端读一页（>5MB）：结果与 planChunk 同形状，供同一套加载器消费。
+			 *
+			 * `pending` 是**上一页留下的跨页半行**：宿主只在窗口里有换行时才把页裁到
+			 * 整行；单行超过一页时返回未裁剪的窗口，由客户端自己拼接（PREVIEW-1）。
+			 * 拼好的 `piece.pending` 交给下一次读取，绝不能把它当成一行。
+			 * @param {number} offset 起始字节偏移
+			 * @param {string} [pending] 上一页返回的半行
+			 */
+			const readRemotePage = async (offset, pending) => {
 				const sessionId = scope === null || scope === undefined ? undefined : scope.sessionId;
 				if (sessionId === undefined || sessionId === null || sessionId === "") throw new Error("no session");
 				const body = { sessionId: sessionId, path: path, offset: offset };
@@ -2029,14 +2174,15 @@ window.__ModuleLoader__.load({
 				}
 				const page = envelope.value;
 				if (page === null || page === undefined || page.kind !== "text") throw new Error("unexpected page");
-				return __cn.chunkFromRead(page.text, page.nextOffset, page.eof === true);
+				return __cn.chunkFromRead(page.text, page.nextOffset, page.eof === true, pending);
 			};
 
 			const appendPiece = (piece, gen) => {
 				if (pageRef.current.gen !== gen) return;
-				const lines = tokenizeChunk(piece, lang);
-				if (lines.length === 0) return;
-				const next = chunksRef.current.concat({ text: piece.text, lines: lines });
+				// 分词结果带跨行状态：下一块接着它继续（块注释 / 字符串不会在接缝处重置）。
+				const tokenized = tokenizePiece(chunksRef.current, piece, lang);
+				if (tokenized.lines.length === 0) return;
+				const next = chunksRef.current.concat({ text: piece.text, lines: tokenized.lines, tokenState: tokenized.state });
 				chunksRef.current = next;
 				setChunks(next);
 			};
@@ -2045,6 +2191,10 @@ window.__ModuleLoader__.load({
 			 * 顺序读取若干块。maxChunks 是预算：1 = 加载更多，Infinity = 全部加载，
 			 * 首屏一次读两页。inflight + gen 守卫：滚动、跳转、footer 同时触发时
 			 * 不会重复读同一页，也不会把上一个文件的页追加到新文件里。
+			 *
+			 * 预算按「真的产出了整行」计：跨页长行的那几页一行都不产出（全部进
+			 * pending），必须继续读到有整行或 EOF —— 否则首屏会停在「正在加载…」
+			 * 且没有任何可滚动内容，界面再也触发不了下一页。
 			 */
 			const loadMore = async (gen, maxChunks) => {
 				const state = pageRef.current;
@@ -2053,16 +2203,27 @@ window.__ModuleLoader__.load({
 				setLoading(true);
 				setLoadError(null);
 				try {
-					for (let n = 0; n < maxChunks; n += 1) {
+					let produced = 0;
+					let guard = 0;
+					for (;;) {
 						if (state.gen !== gen) return;
+						if (produced >= maxChunks) break;
 						if (chunkLineCount(chunksRef.current) >= lineCapRef.current) break;
+						const from = state.offset;
 						const piece = hasContent
 							? __cn.planChunk(content, state.offset, __cn.CHUNK_CHARS)
-							: await readRemotePage(state.offset);
+							: await readRemotePage(state.offset, state.pending);
 						if (state.gen !== gen) return;
+						// 内存态（planChunk）永远按整行切，不会有 pending；分页态沿用宿主的半行。
+						state.pending = hasContent ? "" : (typeof piece.pending === "string" ? piece.pending : "");
 						appendPiece(piece, gen);
 						state.offset = piece.nextOffset;
+						if (piece.lines.length > 0) produced += 1;
 						if (piece.eof) { setAtEnd(true); break; }
+						// 宿主没推进偏移：别原地打转（每页 128KiB，4096 页 ≈ 512MB 的拼接上限）
+						if (piece.nextOffset <= from) break;
+						guard += 1;
+						if (guard > 4096) break;
 					}
 				} catch (error) {
 					if (state.gen === gen) {
@@ -2105,6 +2266,10 @@ window.__ModuleLoader__.load({
 			// - 查询 / 大小写 / 文件变化时取消上一轮（seq 代际）；
 			// - SCAN_MAX_BYTES（默认 64 MB）是预算，扫到就停并让界面说明；
 			// - 扫描只收集「行/列」，不保留页文本，内存只与命中数相关。
+			// - 停下来的原因要分开记（`cappedReason`）：命中上限（2000 条）与字节
+			//   预算停的是两件事，界面文案和计数 `+` 完全不同（PREVIEW-4）。
+			// - 跨页半行（pending）同样要接住：起扫点就是加载器的游标，它可能正停在
+			//   一个跨页长行的中间；不带上这个半行，后面所有行号都会少算一行。
 			react.useEffect(() => {
 				const seq = scanSeq.current + 1;
 				scanSeq.current = seq;
@@ -2114,45 +2279,47 @@ window.__ModuleLoader__.load({
 				}
 				let cancelled = false;
 				let timerId = null;
-				const state = { matches: [], capped: false, lines: 0, offset: pageRef.current.offset };
+				let scanPending = typeof pageRef.current.pending === "string" ? pageRef.current.pending : "";
+				const state = { matches: [], capped: false, cappedReason: null, lines: 0, offset: pageRef.current.offset };
 				// 已加载块逐块搜（不在拼接文本上搜：块边界是换行，拼接会制造跨块假命中）
 				for (const chunk of chunksRef.current) {
 					const found = __cn.findMatches(chunk.text, deferredQuery, { caseSensitive });
 					const merged = __cn.appendScannedMatches(state.matches, found, state.lines, __cn.MAX_MATCHES);
 					state.matches = merged.matches;
-					state.capped = state.capped || merged.capped;
+					if (merged.capped === true) { state.capped = true; state.cappedReason = "hits"; }
 					state.lines += chunk.lines.length;
 				}
 				const reachedEnd = typeof sizeBytes === "number" && Number.isFinite(sizeBytes) && state.offset >= sizeBytes;
 				const initialDone = reachedEnd || state.capped;
-				setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: initialDone, error: null });
+				setScan({ matches: state.matches.slice(), capped: state.capped, cappedReason: state.cappedReason, scannedBytes: state.offset, done: initialDone, error: null });
 				if (initialDone) return undefined;
 				timerId = setTimeout(() => {
 					void (async () => {
 						for (;;) {
 							if (cancelled || scanSeq.current !== seq) return;
 							if (state.offset >= __cn.SCAN_MAX_BYTES) {
-								setScan({ matches: state.matches.slice(), capped: true, scannedBytes: state.offset, done: true, error: null });
+								setScan({ matches: state.matches.slice(), capped: true, cappedReason: "bytes", scannedBytes: state.offset, done: true, error: null });
 								return;
 							}
 							let piece;
 							try {
-								piece = await readRemotePage(state.offset);
+								piece = await readRemotePage(state.offset, scanPending);
 							} catch (error) {
 								if (cancelled || scanSeq.current !== seq) return;
 								const message = error !== null && error !== undefined && error.message !== undefined ? String(error.message) : String(error);
-								setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: true, error: message });
+								setScan({ matches: state.matches.slice(), capped: state.capped, cappedReason: state.cappedReason, scannedBytes: state.offset, done: true, error: message });
 								return;
 							}
 							if (cancelled || scanSeq.current !== seq) return;
+							scanPending = typeof piece.pending === "string" ? piece.pending : "";
 							const found = __cn.findMatches(piece.text, deferredQuery, { caseSensitive });
 							const merged = __cn.appendScannedMatches(state.matches, found, state.lines, __cn.MAX_MATCHES);
 							state.matches = merged.matches;
-							state.capped = state.capped || merged.capped;
+							if (merged.capped === true) { state.capped = true; state.cappedReason = "hits"; }
 							state.lines += piece.lines.length;
 							state.offset = piece.nextOffset;
 							const finished = piece.eof === true || state.capped;
-							setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: finished, error: null });
+							setScan({ matches: state.matches.slice(), capped: state.capped, cappedReason: state.cappedReason, scannedBytes: state.offset, done: finished, error: null });
 							if (finished) return;
 						}
 					})();
@@ -2173,6 +2340,8 @@ window.__ModuleLoader__.load({
 				const gen = state.gen;
 				state.offset = 0;
 				state.inflight = false;
+				// 跨页半行属于上一个文件：不清空会被拼进新文件的第一行。
+				state.pending = "";
 				chunksRef.current = [];
 				setChunks([]);
 				setAtEnd(false);
@@ -2228,9 +2397,11 @@ window.__ModuleLoader__.load({
 			const totalForText = totalLines === null ? tokens.length : totalLines;
 			// 渲染窗口是「能跳转的行号范围」的唯一来源：搜索与大纲都按它裁剪，
 			// 否则窗口外的匹配会被计入 n/m；窗口外的符号会出现在列表里却点不动。
+			// 依赖里必须带 lineCap：解除上限时 tokens.length 不变、可渲染行数变，
+			// 只依赖 tokens.length 的 memo 会继续用旧上限（PREVIEW-3 的一半）。
 			const renderedCount = react.useMemo(
 				() => __cn.renderedLineCount(tokens.length, lineCap),
-				[tokens.length]
+				[tokens.length, lineCap]
 			);
 			// DOM 渲染窗口：只挂视口附近的 ~100 行，其余用上下 padding 撑出滚动高度。
 			// 行高固定（CSS line-height:20px），所以行区间与占位高度都能纯算出来。
@@ -2292,18 +2463,32 @@ window.__ModuleLoader__.load({
 				}
 				return scan === null ? EMPTY_MATCHES : scan.matches;
 			}, [hasContent, content, deferredQuery, caseSensitive, scan]);
+			// 「后台扫描为什么停」的唯一来源：命中上限与字节预算的文案 / 计数 `+` 不同。
+			const scanStop = __cn.scanStopState(scan);
 			const matches = react.useMemo(() => {
 				const visible = __cn.clipZeroBasedToRenderWindow(rawMatches, lineCap);
-				if (rawMatches.capped === true) Object.defineProperty(visible, "capped", { value: true, enumerable: false });
+				// 分页态的 rawMatches 是扫描攒出来的普通数组，没有 findMatches 挂上去的
+				// 非枚举 capped；命中上限停下时必须在这里补上，否则计数永远是 `1/2000`
+				// 而不是 `1/2000+`（PREVIEW-4）。同理保留 rawMatches 自带的 capped。
+				if (rawMatches.capped === true || scanStop.counterCapped === true) {
+					Object.defineProperty(visible, "capped", { value: true, enumerable: false });
+				}
 				return visible;
-			}, [rawMatches, lineCap]);
+			}, [rawMatches, lineCap, scanStop.counterCapped]);
 			const beyondCapCount = rawMatches.length - matches.length;
 			const scanning = paging && deferredQuery !== "" && scan !== null && scan.done !== true;
 			const scanError = scan !== null && scan.error !== null && scan.error !== undefined ? scan.error : null;
-			const scanCapped = scan !== null && scan.done === true && scan.capped === true;
+			const scanCapped = scanStop.stopped;
 			const scanInfo = __cn.scanProgress(scan === null ? 0 : scan.scannedBytes, sizeBytes);
+			// 命中上限 / 字节预算：两句话完全不同，别再把「只扫了 1.6MB」说成「前 6.3MB」。
+			const scanCappedText = scanCapped !== true || scanStop.noticeKey === null
+				? ""
+				: scanStop.reason === "hits"
+					? t("search.scanHitCap").replace("{n}", String(__cn.MAX_MATCHES))
+					: t("search.scanCapped").replace("{mb}", formatBytes(scanInfo.limitBytes));
 			const curIndex = matches.length > 0 ? Math.min(cur, matches.length - 1) : -1;
-			// findMatches 只在确实探测到第 N+1 条时标记 capped。
+			// findMatches 只在确实探测到第 N+1 条时标记 capped；分页态的命中上限由
+			// scanStopState 提供（见上面 matches 的补标记）。
 			const matchCapped = matches.capped === true;
 			// 计数口径：分母是可导航（裁剪后）条数；命中上限与预览上限两个裁剪
 			// 分开表达，不能再把「窗口外还有」说成 n/2000+ 或「无匹配」。
@@ -2600,12 +2785,27 @@ window.__ModuleLoader__.load({
 
 			// footer：进度 + 加载更多 / 全部加载 / 重试 / 下载。只在还有后续内容、
 			// 正在读、失败或到达上限时出现；普通小文件读完就不显示这条。
+			//
+			// 上限相关的可见性不准再用 `atCap = !atEnd && ...`：EOF 正好落在越过上限
+			// 的那一块时 footer 会整条消失，多加载的行永远看不到（PREVIEW-3）。
+			// capControls 给出的是持久条件（上限没解除 + 有行被挡住 / 上限还卡着）。
+			const cap = __cn.capControls({
+				tokensLength: tokens.length,
+				renderedCount: renderedCount,
+				lineCap: lineCap,
+				capLifted: capLifted,
+				atEnd: atEnd,
+				paging: paging
+			});
 			const showMore = !atEnd && !loading && loadError === null && renderedCount < lineCap;
-			const atCap = !atEnd && renderedCount >= lineCap;
 			const progressText = totalLines === null
 				? t("paging.loaded").replace("{n}", String(tokens.length))
 				: t("paging.progress").replace("{n}", String(tokens.length)).replace("{total}", String(totalLines));
-			const footer = browsable && (showMore || loading || loadError !== null || atCap || (paging && downloadHref !== null))
+			// footer 里的「全部加载」与头部、beyondCap 提示是同一个动作：解除上限并把
+			// 剩余内容读完。以前它只 loadMore(Infinity)，停在 50,000 行 —— 同一个
+			// 文案的按钮行为不同，点一次不够还要再点一次（PREVIEW-3）。
+			const loadRest = () => { liftCap(); };
+			const footer = browsable && (showMore || loading || loadError !== null || cap.footerAtCap || (paging && downloadHref !== null))
 				? jsxs("div", {
 					className: "cn-more",
 					children: [
@@ -2630,11 +2830,11 @@ window.__ModuleLoader__.load({
 							? jsx("button", {
 								type: "button",
 								className: "cn-mini",
-								onClick: () => { void loadRef.current(pageRef.current.gen, Infinity); },
+								onClick: loadRest,
 								children: t("paging.loadAll")
 							}, "all")
 							: null,
-						atCap
+						cap.footerAtCap
 							? jsxs("span", {
 								className: "cn-more-err",
 								children: [
@@ -2791,14 +2991,15 @@ window.__ModuleLoader__.load({
 					// 超 5MB：宿主不给正文，这里用 sidebar/api/fs.readPage 只读分页。
 					// 说明行右侧放「全部加载」：与宿主内置分页预览的按钮对齐，读完整文件
 					// （解除 50,000 行预览上限），不必先搜索或滚到底。
+					// 上限已生效时即使 atEnd 也要保留这个按钮（否则越上限加载的行无路可走）：
+					// 可见性由 capControls 的持久条件决定，不看瞬时的 atEnd。
 					paging
 						? jsxs("div", {
 							className: "cn-note cn-note-row",
 							children: [
 								jsx("span", { role: "status", children: t("paging.remote").replace("{size}", tooLargeSize) }, "text"),
-								atEnd
-									? null
-									: jsx("button", {
+								cap.showHeaderLoadAll
+									? jsx("button", {
 										type: "button",
 										className: "cn-mini",
 										disabled: loading,
@@ -2806,6 +3007,7 @@ window.__ModuleLoader__.load({
 										onClick: liftCap,
 										children: loading ? t("paging.loading") : t("paging.loadAll")
 									}, "loadall")
+									: null
 							]
 						}, "remote")
 						: null,
@@ -2836,8 +3038,9 @@ window.__ModuleLoader__.load({
 								: t("search.scanning").replace("{percent}", String(scanInfo.percent))
 						}, "scanning")
 						: null,
+					// 命中上限 / 字节预算：两句完全不同的说明（见 scanStopState）。
 					scanCapped === true
-						? jsx("div", { className: "cn-warn", role: "status", children: t("search.scanCapped").replace("{mb}", formatBytes(scanInfo.limitBytes)) }, "scancapped")
+						? jsx("div", { className: "cn-warn", role: "status", children: scanCappedText }, "scancapped")
 						: null,
 					scanError === null
 						? null

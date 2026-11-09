@@ -37,7 +37,7 @@ function readLf(file) {
 export const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "draft-coords", "render-window", "file-chunks", "virtual-rows", "view-state"];
 export const EXPORTS = [
   "langOf", "langLabel", "LANG_EXT", "LANG_META",
-  "tokenizeLines", "outlineOf", "outlineOfTokens", "kindGroup", "OUTLINE_MAX_SYMBOLS",
+  "tokenizeLines", "tokenizeLinesWithState", "outlineOf", "outlineOfTokens", "kindGroup", "OUTLINE_MAX_SYMBOLS",
   "findMatches", "spansOfLine", "MAX_MATCHES",
   "SCAN_MAX_BYTES", "appendScannedMatches", "scanProgress",
   "SELECTION_LIMIT", "selectionHeader", "selectionWhere", "selectionPayload", "buildSelectionInsert",
@@ -47,7 +47,8 @@ export const EXPORTS = [
   "CHUNK_CHARS", "INITIAL_CHUNK_CHARS", "MAX_PREVIEW_LINES", "PLAIN_CHUNK_CHARS",
   "lineCountOf", "planChunk", "chunkFromRead", "chunkNeedsPlain",
   "ROW_HEIGHT", "OVERSCAN_ROWS", "NOMINAL_VIEW_HEIGHT", "rowWindow", "rowScrollTop",
-  "themeIsDark", "lineWindowState", "matchWindowState", "symbolsEmptyKind"
+  "themeIsDark", "lineWindowState", "matchWindowState", "symbolsEmptyKind",
+  "capControls", "scanStopState"
 ];
 
 /** 顶层声明名（含被 export 修饰的），用于重名与导出面校验。 */

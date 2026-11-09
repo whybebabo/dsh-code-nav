@@ -123,7 +123,7 @@ if (DRY) {
   // 但 dry-run 的性质不变 —— 无论 fresh / stale 都 exit 0，不写盘、不联网。
   if (existsSync(TGZ)) {
     try {
-      const freshness = checkArtifactFreshness({ tgzPath: TGZ, version: pkg.version, buildCode: buildBundle().code });
+      const freshness = checkArtifactFreshness({ tgzPath: TGZ, version: pkg.version, buildCode: buildBundle().code, root: ROOT });
       console.log("[release] dry run: 产物新鲜度 " + (freshness.fresh ? "fresh（与当前构建一致）" : "STALE（不是当前这棵树的包）"));
       for (const reason of freshness.reasons) console.log("[release]   - " + reason);
     } catch (error) {
@@ -156,7 +156,9 @@ try {
 // 1) 发布资产新鲜度 —— 必须在取 token 之前、任何远端写之前。
 //    `npm test` 只证明「树上代码是绿的」，证明不了工作区里那个同名 .tgz 是当前
 //    这棵树打的包。曾经 pack 之后改一行源码，Release 附件就与 tag 指向的源码
-//    不一致，而全链路没有任何门能发现（审查 P0-1）。这里直接读 tarball 内容比对。
+//    不一致，而全链路没有任何门能发现（审查 P0-1）。这里直接读 tarball 内容，
+//    把**每一个**打包文件与工作区同名文件比对（文本按 CRLF→LF 归一）——
+//    只比 lib/client.js 会漏掉 lib/index.js / cordis.patch.yml / README（REL-1）。
 console.log("[release] 发布前门禁：校验发布资产是否由当前这棵树生成 …");
 let buildCode;
 try {
@@ -169,7 +171,7 @@ try {
   console.error("[release] 本次未推送、未打 tag、未创建 Release。");
   process.exit(1);
 }
-const freshness = checkArtifactFreshness({ tgzPath: TGZ, version: pkg.version, buildCode });
+const freshness = checkArtifactFreshness({ tgzPath: TGZ, version: pkg.version, buildCode, root: ROOT });
 if (!freshness.fresh) {
   console.error("[release] 发布资产不新鲜（stale），拒绝发布：");
   for (const reason of freshness.reasons) console.error("[release]   - " + reason);
@@ -179,7 +181,8 @@ if (!freshness.fresh) {
 }
 console.log(
   "[release] 产物新鲜度 OK：tarball 版本 " + freshness.tarballVersion +
-  "，lib/client.js sha256 " + freshness.tarballSha256.slice(0, 12) + "…"
+  "，lib/client.js sha256 " + freshness.tarballSha256.slice(0, 12) + "…" +
+  "，已核对 " + freshness.files.length + " 个打包文件与工作区一致"
 );
 
 // 2) token —— 取不到就停下。失败信息只说「取不到」，绝不回显 credential 的输出

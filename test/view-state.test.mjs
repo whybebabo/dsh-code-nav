@@ -11,10 +11,12 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-	themeIsDark,
-	lineWindowState,
+	capControls,
 	matchWindowState,
-	symbolsEmptyKind
+	scanStopState,
+	symbolsEmptyKind,
+	themeIsDark,
+	lineWindowState
 } from "../src/view-state.js";
 import { clipToRenderWindow, lineIsPlain, PLAIN_LINE_MAX_CHARS, PLAIN_LINE_MAX_SEGS } from "../src/render-window.js";
 
@@ -219,6 +221,107 @@ test("symbols empty kind: the client's clipped list length distinguishes window 
 	const mixed = [...list, { kind: "class", name: "early", line: 3 }];
 	assert.equal(symbolsEmptyKind(true, 0, mixed.length), "filtered");
 	assert.equal(symbolsEmptyKind(true, 1, mixed.length), "ok");
+});
+
+// ---------- capControls（PREVIEW-3：上限在 EOF 处生效时不能把解除入口藏起来） ----------
+
+test("cap controls: 50k+ loaded at EOF still offers the lift control", () => {
+	// EOF 正好落在越过上限的那一块：loaded=50001 但只渲染 50000。
+	// 旧实现 atCap = !atEnd && ... 在 atEnd 时把所有解除入口都藏了起来。
+	const atEof = capControls({ tokensLength: 50001, renderedCount: 50000, lineCap: 50000, capLifted: false, atEnd: true, paging: true });
+	assert.deepEqual(atEof, { hiddenLines: 1, showLift: true, showHeaderLoadAll: true, footerAtCap: true });
+	// 内存态（≤5MB）同样会 overshoot：没有 header 按钮，但 footer 的解除入口必须在。
+	const inMemory = capControls({ tokensLength: 100001, renderedCount: 50000, lineCap: 50000, capLifted: false, atEnd: true, paging: false });
+	assert.deepEqual(inMemory, { hiddenLines: 50001, showLift: true, showHeaderLoadAll: false, footerAtCap: true });
+});
+
+test("cap controls: exactly at the cap mid-file keeps the lift control", () => {
+	// renderedCount 顶到 lineCap、还有后续内容：没有「被挡住的行」，仍需解除入口。
+	const midFile = capControls({ tokensLength: 50000, renderedCount: 50000, lineCap: 50000, capLifted: false, atEnd: false, paging: true });
+	assert.deepEqual(midFile, { hiddenLines: 0, showLift: true, showHeaderLoadAll: true, footerAtCap: true });
+	const midInMemory = capControls({ tokensLength: 50000, renderedCount: 50000, lineCap: 50000, capLifted: false, atEnd: false, paging: false });
+	assert.deepEqual(midInMemory, { hiddenLines: 0, showLift: true, showHeaderLoadAll: false, footerAtCap: true });
+});
+
+test("cap controls: a normal small file shows no cap control at all", () => {
+	const small = capControls({ tokensLength: 10, renderedCount: 10, lineCap: 50000, capLifted: false, atEnd: true, paging: false });
+	assert.deepEqual(small, { hiddenLines: 0, showLift: false, showHeaderLoadAll: false, footerAtCap: false });
+	// 分页小文件读完（atEnd）也不需要「全部加载」了
+	const pagedDone = capControls({ tokensLength: 10, renderedCount: 10, lineCap: 50000, capLifted: false, atEnd: true, paging: true });
+	assert.deepEqual(pagedDone, { hiddenLines: 0, showLift: false, showHeaderLoadAll: false, footerAtCap: false });
+});
+
+test("cap controls: after lifting the cap there is nothing left to lift", () => {
+	const liftedAtEof = capControls({ tokensLength: 300000, renderedCount: 300000, lineCap: Number.MAX_SAFE_INTEGER, capLifted: true, atEnd: true, paging: true });
+	assert.deepEqual(liftedAtEof, { hiddenLines: 0, showLift: false, showHeaderLoadAll: false, footerAtCap: false });
+	// 解除后还在加载：进度提示旁边不该再挂一个同名的「全部加载」
+	const lifting = capControls({ tokensLength: 60000, renderedCount: 60000, lineCap: Number.MAX_SAFE_INTEGER, capLifted: true, atEnd: false, paging: true });
+	assert.deepEqual(lifting, { hiddenLines: 0, showLift: false, showHeaderLoadAll: false, footerAtCap: false });
+});
+
+test("cap controls: invalid inputs never invent a control", () => {
+	const empty = capControls();
+	assert.deepEqual(empty, { hiddenLines: 0, showLift: false, showHeaderLoadAll: false, footerAtCap: false });
+	for (const bad of [Number.NaN, -1, "50000", null, undefined, Infinity]) {
+		const state = capControls({ tokensLength: bad, renderedCount: bad, lineCap: bad, atEnd: true, paging: true });
+		assert.equal(state.hiddenLines, 0, String(bad));
+		assert.equal(state.showLift, false, String(bad));
+	}
+	// renderedCount 不允许超过 tokensLength（否则会算出负的 hiddenLines）
+	const clamped = capControls({ tokensLength: 10, renderedCount: 999, lineCap: 50000, atEnd: true, paging: true });
+	assert.equal(clamped.hiddenLines, 0);
+});
+
+// ---------- scanStopState（PREVIEW-4：命中上限 vs 字节预算） ----------
+
+test("scan stop: the hit cap and the byte budget are different stops", () => {
+	// 找到 MAX_MATCHES 条就停：文案是「已找到 N 处（达到上限）」，计数要带 +
+	const hits = { done: true, capped: true, cappedReason: "hits" };
+	assert.deepEqual(scanStopState(hits), {
+		stopped: true, reason: "hits", noticeKey: "search.scanHitCap", counterCapped: true
+	});
+	// 64MB 预算扫完：文案是「只扫描了前 {limitBytes}」，命中数组没有被截断到上限
+	const bytes = { done: true, capped: true, cappedReason: "bytes" };
+	assert.deepEqual(scanStopState(bytes), {
+		stopped: true, reason: "bytes", noticeKey: "search.scanCapped", counterCapped: false
+	});
+});
+
+test("scan stop: reaching EOF is a complete scan, not a capped one", () => {
+	assert.deepEqual(scanStopState({ done: true, capped: false, cappedReason: null }), {
+		stopped: false, reason: null, noticeKey: null, counterCapped: false
+	});
+	// 还在扫（done=false）：命中已经封顶也不用解释「停下来了」
+	assert.equal(scanStopState({ done: false, capped: true, cappedReason: "hits" }).stopped, false);
+	assert.equal(scanStopState({ done: false, capped: false, cappedReason: null }).noticeKey, null);
+});
+
+test("scan stop: the old capped-without-reason state is read as the byte budget", () => {
+	// 兼容上一次构建留下的状态形状（没有 cappedReason 字段）
+	assert.deepEqual(scanStopState({ done: true, capped: true }), {
+		stopped: true, reason: "bytes", noticeKey: "search.scanCapped", counterCapped: false
+	});
+});
+
+test("scan stop: invalid input degrades to 'not stopped'", () => {
+	for (const value of [undefined, null, {}, { done: "true", capped: true }, { done: true, cappedReason: "hits ", capped: false }]) {
+		const state = scanStopState(value);
+		assert.equal(state.stopped, false, JSON.stringify(value));
+		assert.equal(state.noticeKey, null, JSON.stringify(value));
+		assert.equal(state.counterCapped, false, JSON.stringify(value));
+	}
+});
+
+test("scan stop: the hit cap makes the counter render 2000+", () => {
+	// 客户端：matches = 扫描攒出来的普通数组，capped 由 scanStopState 补上
+	const state = scanStopState({ done: true, capped: true, cappedReason: "hits" });
+	const capped = state.counterCapped;
+	const windowed = matchWindowState(2000, capped, 2000);
+	assert.equal(windowed.kind, "countCapped");
+	assert.equal("1/" + windowed.total + (windowed.kind === "countCapped" ? "+" : ""), "1/2000+");
+	// 字节预算停下时不能谎报还有更多
+	const bytes = scanStopState({ done: true, capped: true, cappedReason: "bytes" });
+	assert.equal(matchWindowState(1500, bytes.counterCapped, 2000).kind, "count");
 });
 
 // ---------- lineIsPlain（超长行关闭逐 token 高亮） ----------

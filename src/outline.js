@@ -71,6 +71,17 @@ function countBraces(s) {
   return d;
 }
 
+/** `(` `[` `{` 的配平增量；Python 用它区分类体直属层与 dict / 参数列表续行。 */
+function bracketDelta(s) {
+  let d = 0;
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (ch === "(" || ch === "[" || ch === "{") d++;
+    else if (ch === ")" || ch === "]" || ch === "}") d--;
+  }
+  return d;
+}
+
 /** 圆括号配平：跨行参数列表据此判断声明是否还没结束。 */
 function parenBalance(s) {
   let d = 0;
@@ -217,6 +228,21 @@ function acceptBodyless(rule, text, m, ctx) {
     const tail = text.slice(close + 1);
     return !/[{};=]/.test(tail);
   }
+  // TS/JS 的 `semi: false`（Prettier 选项 / Standard 风格）：接口成员可以只靠换行
+  // 结束，没有 `;`。只接受「接口体直属层 + 该虚拟行是物理行末尾 + 参数表配平后
+  // 只剩 `: Type` 尾巴（可跨行参数）」；带 `;` / `=` / 函数体的行仍走后面的通用
+  // 规则，行为不变。
+  if (rule.bodyless === "tsInterfaceMember") {
+    if (ctx.endsLine !== true) return false;
+    if (top === null || top.kind !== "interface" || ctx.depthBefore !== top.depth + 1) return false;
+    const nameEnd = m.index + m[0].lastIndexOf(name) + name.length;
+    const openIdx = text.indexOf("(", nameEnd);
+    if (openIdx < 0) return false;
+    const close = matchParenClose(text, openIdx);
+    if (close < 0) return false;
+    const tail = text.slice(close + 1);
+    return /^\s*(?::[^{};]*)?$/.test(tail);
+  }
   if (!/;\s*$/.test(text)) return false;
   if (rule.bodyless === "prototype") {
     return top === null && ctx.depthBefore === 0 && hasReturnTypeBefore(m, name);
@@ -318,6 +344,9 @@ function bodyAccepted(rule, clean, i, cleans, m, ctx) {
       end = k;
     }
     if (bal > 0) return { ok: false, end: i }; // 括号始终没配平：不是可判定的声明
+    // 「换行即结束」的判定要跟着拼接后的最后一段走：`run(opts: { a: number }): void`
+    // 会被 `{`/`}` 切段，只有拼完才知道声明确实止于物理行末。
+    if (ctx.lineEnds !== undefined) ctx.endsLine = ctx.lineEnds[end] === true;
     if (inlineBodyAfter(text, nameEnd)) return { ok: true, end };
   }
   if (acceptBodyless(rule, text, m, ctx)) return { ok: true, end };
@@ -332,6 +361,37 @@ function bodyAccepted(rule, clean, i, cleans, m, ctx) {
     }
   }
   return { ok: false, end };
+}
+
+/**
+ * C / C++ 的 `typedef struct { … } Alias;` / `typedef enum { … } Alias;`：
+ * 开行没有标签名，真正的名字在收尾的 `} Alias;` 段。这里先做一次前向扫描，
+ * 把开行重写成 `typedef struct Alias {`，后续规则与容器栈就与「有标签」的
+ * 写法完全一致；收尾段（`} Alias;`）不含声明形状，不会产生第二个符号。
+ * 收尾不是「标识符 + 可选分号」时（函数指针 / `__attribute__` 等）不猜名字，
+ * 保持原样（这类 typedef 依旧不出符号，见 README 已知限制）。
+ */
+const TYPEDEF_OPEN_RE = /^(\s*typedef\s+)(struct|enum|union)\s*\{\s*$/;
+const TYPEDEF_ALIAS_RE = /^\s*([A-Za-z_]\w*)\s*;?\s*$/;
+/** 匿名 typedef 体最多向后找多少段（防畸形输入把整份文件扫成 O(n²)）。 */
+const MAX_TYPEDEF_BODY_SEGMENTS = 20000;
+function resolveTypedefNames(cleans) {
+  for (let i = 0; i < cleans.length; i++) {
+    const m = TYPEDEF_OPEN_RE.exec(cleans[i]);
+    if (m === null) continue;
+    let depth = countBraces(cleans[i]);
+    let close = -1;
+    const max = Math.min(cleans.length, i + MAX_TYPEDEF_BODY_SEGMENTS);
+    for (let k = i + 1; k < max; k++) {
+      depth += countBraces(cleans[k]);
+      if (depth === 0) { close = k; break; }
+      if (depth < 0) break; // 不配平：放弃
+    }
+    if (close < 0 || close + 1 >= cleans.length) continue;
+    const ma = TYPEDEF_ALIAS_RE.exec(cleans[close + 1]);
+    if (ma === null) continue;
+    cleans[i] = m[1] + m[2] + " " + ma[1] + " {";
+  }
 }
 
 /**
@@ -351,6 +411,16 @@ function extractBrace(lang, tokens, rules, lineCount) {
   for (let i = 0; i < cleans.length; i++) {
     if (cleans[i].includes("<")) cleans[i] = stripMemberGenerics(cleans[i]);
   }
+  // 匿名 typedef 的别名在收尾行：补进开行，容器栈才能用上真名（C/C++ 专用）
+  if (lang === "c" || lang === "cpp") resolveTypedefNames(cleans);
+  /** 该虚拟行是否是所在物理行的最后一段（TS/JS「换行即结束」的成员判定用）。 */
+  const endsSourceLine = (i) => {
+    for (let k = i + 1; k < cleans.length && srcLines[k] === srcLines[i]; k++) {
+      if (cleans[k].trim().length > 0) return false;
+    }
+    return true;
+  };
+  const lineEnds = cleans.map((_, k) => endsSourceLine(k));
   const consumed = new Set();
   for (let i = 0; i < cleans.length; i++) {
     const clean = cleans[i];
@@ -365,7 +435,7 @@ function extractBrace(lang, tokens, rules, lineCount) {
         if (m === null) continue;
         const name = m[rule.nameGroup];
         if (typeof name !== "string" || name.length === 0 || name.length > 80) continue;
-        const ctx = { m, depthBefore, stack, clean, lang };
+        const ctx = { m, depthBefore, stack, clean, lang, endsLine: lineEnds[i] === true, lineEnds };
         if (rule.when && !rule.when(ctx)) continue;
         const kind = typeof rule.kind === "function" ? rule.kind(m, depthBefore, ctx) : rule.kind;
         const ruleContainer = typeof rule.containerOf === "function" ? rule.containerOf(m) : undefined;
@@ -434,10 +504,26 @@ function extractPython(tokens, lineCount) {
   const scopes = []; // { type: "class"|"def", indent, name }
   const RE_CLASS = /^\s*class\s+([A-Za-z_]\w*)/;
   const RE_DEF = /^\s*(?:async\s+)?def\s+([A-Za-z_]\w*)/;
-  const RE_VAR = /^\s*([A-Za-z_]\w*)\s*=/;
+  // 赋值 / 带注解的赋值：`name =`、`name: Type =`（dataclass / Pydantic 的常见写法）
+  const RE_VAR = /^\s*([A-Za-z_]\w*)\s*(?::\s*[^=]+?)?\s*=(?!=)/;
+  // 只有注解没有初值的声明：`name: Type`（dataclass 必填字段 / 纯类型声明）。
+  // 注解必须以非空白字符开头，避免把「被剥掉字符串后的 dict 值」当成字段。
+  const RE_ANN = /^\s*([A-Za-z_]\w*)\s*:\s*\S[^=]*$/;
+  /** 类体直属层 → field + container；模块级（缩进 0）→ variable；方法体内不进大纲。 */
+  const emitBinding = (name, line, indent) => {
+    const top = scopes.length > 0 ? scopes[scopes.length - 1] : null;
+    if (top !== null && top.type === "class") {
+      out.push({ kind: "field", name, line, container: top.name });
+    } else if (top === null && indent === 0) {
+      out.push({ kind: "variable", name, line });
+    }
+  };
+  let bracket = 0; // 行首括号深度：区分「类体直属层」与 dict / 参数列表续行
   for (let i = 0; i < lineCount; i++) {
     const clean = cleanOf(tokens, i);
     if (clean.trim().length === 0) continue;
+    const bracketBefore = bracket;
+    bracket += bracketDelta(clean);
     const indent = pyIndentOf(clean);
     // 缩进回到声明所在层级：该类 / 函数（及其嵌套作用域）已经结束
     while (scopes.length > 0 && indent <= scopes[scopes.length - 1].indent) scopes.pop();
@@ -461,17 +547,16 @@ function extractPython(tokens, lineCount) {
       scopes.push({ type: "def", indent });
       continue;
     }
-    // 裸赋值：类体直属层的 `name = "x"` 是类属性（field + container）；
-    // 模块级（无作用域、缩进 0）是变量；方法体内的局部赋值不进入大纲。
+    // 裸赋值 / 带注解的赋值 / 纯注解声明：类体直属层的 `name = "x"`、`x: int`、
+    // `x: int = 0` 都是类属性（field + container）；模块级（无作用域、缩进 0）是
+    // 变量；方法体内的局部声明不进入大纲。
     const mV = RE_VAR.exec(clean);
     if (mV !== null) {
-      const top = scopes.length > 0 ? scopes[scopes.length - 1] : null;
-      if (top !== null && top.type === "class") {
-        out.push({ kind: "field", name: mV[1], line: i + 1, container: top.name });
-      } else if (top === null && indent === 0) {
-        out.push({ kind: "variable", name: mV[1], line: i + 1 });
-      }
+      emitBinding(mV[1], i + 1, indent);
+      continue;
     }
+    const mA = RE_ANN.exec(clean);
+    if (mA !== null && bracketBefore === 0) emitBinding(mA[1], i + 1, indent);
   }
   return out;
 }
@@ -1000,6 +1085,15 @@ export function outlineOfTokens(tokens, lang) {
           nameGroup: 1, depth: "any", container: false, endsWith: null
         });
       }
+      if (jsLike) {
+        // TS/JS `semi: false`：接口方法签名可以只靠换行结束（没有 `;`）。
+        // 放在通用方法规则之前，只接管「接口体直属层 + 物理行末尾 + 无 `;`」的
+        // 签名（判定见 acceptBodyless）；带 `;` / 函数体的行继续走通用规则。
+        rules.push({
+          re: METHOD_RE, kind: kindOfMethod, nameGroup: 1, depth: "gt0", container: false,
+          endsWith: needsBody, bodyless: "tsInterfaceMember"
+        });
+      }
       rules.push({
         re: METHOD_RE, kind: kindOfMethod, nameGroup: 1, depth: "gt0", container: false,
         endsWith: needsBody, bodyless: "member"
@@ -1023,6 +1117,18 @@ export function outlineOfTokens(tokens, lang) {
           re: /^\s*(?:export\s+)*const\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?function\b/,
           kind: "function", nameGroup: 1, depth: "any", container: false, endsWith: null
         });
+        // TS `semi: false`：只有类型注解、没有初值 / 分号的类属性（`foo: string`、
+        // `bar?: number`）。只接「类 / 接口体直属层 + 物理行末尾 + 行内没有 `=`」，
+        // 带 `=` / `;` 的行仍由下面的规则处理，行为不变。
+        rules.push({
+          re: /^\s*(?:(?:public|private|protected|readonly|static|declare|override|abstract|accessor)\s+)*(#?[A-Za-z_$][\w$]*)\s*[?!]?\s*:\s*[^=;{}]+$/,
+          kind: "field", nameGroup: 1, depth: "gt0", container: false, endsWith: null,
+          when: ({ depthBefore, stack, clean, endsLine }) => {
+            const top = stack.length > 0 ? stack[stack.length - 1] : null;
+            return endsLine === true && top !== null && depthBefore === top.depth + 1 &&
+              CLASS_BODY_KINDS.has(top.kind) && !STATEMENT_LEAD.test(clean);
+          }
+        });
         // TS/JS 类属性 / 箭头字段：只在类（或接口）体直属层匹配，
         // 因此方法体里的局部赋值不会变成字段，方法本身（name(）也不会被抢走。
         rules.push({
@@ -1043,6 +1149,17 @@ export function outlineOfTokens(tokens, lang) {
           nameGroup: 1, depth: "any", container: false, endsWith: null
         });
       } else if (lang === "java" || lang === "csharp" || lang === "c" || lang === "cpp") {
+        if (lang === "c" || lang === "cpp") {
+          // C 的 `typedef struct Named { … }` / `typedef enum Named { … }`。
+          // 匿名形式（`typedef struct { … } Alias;`）的名字已由 resolveTypedefNames
+          // 在扫描前补到开行上，这里只看「typedef struct|enum|union Name」的形态；
+          // 收尾的 `} Alias;` 不是声明形状，不会再产生第二个符号。
+          rules.unshift({
+            re: /^\s*typedef\s+(struct|enum|union)\s+([A-Za-z_]\w*)\s*\{?/,
+            kind: (m) => (m[1] === "enum" ? "enum" : "struct"),
+            nameGroup: 2, depth: "any", container: true, endsWith: null
+          });
+        }
         if (lang === "csharp") {
           // C# 自动属性 `public int X { get; set; }` / 表达式属性 `public int Y => 1;`。
           // 行内大括号会被切成分段，故 `{\s*$` 也算属性体开始。
@@ -1109,6 +1226,14 @@ export function outlineOfTokens(tokens, lang) {
         // 内时由通用 METHOD_RE 命中（关键字过滤已按「容器直属层」豁免）。
         rules.push({ re: /^\s*(?:public|private|internal|fileprivate|static|open)?\s*(?:var|let)\s+([A-Za-z_]\w*)/, kind: (m, d, ctx) => directMember(ctx, MEMBER_CONTAINER_KINDS) !== null ? "field" : "variable", nameGroup: 1, depth: "any", container: false, endsWith: null });
       } else if (lang === "kotlin") {
+        // Kotlin 的枚举只有 `enum class X` 一种写法（`enum` 是修饰词）。通用
+        // CLASS_RE 会把 `enum class Color` 读成关键字 enum + 名字 class，且它排在
+        // 规则最前、Kotlin 分支永远轮不到；这里把定向规则插到 rules[0]。
+        const KT_MODS = "(?:(?:public|private|protected|internal|data|sealed|abstract|open|final|annotation|value|expect|actual|override|suspend|inline|tailrec|operator|infix|external)\\s+)*";
+        rules.unshift({
+          re: new RegExp("^\\s*" + KT_MODS + "enum\\s+class\\s+([A-Za-z_]\\w*)"),
+          kind: "enum", nameGroup: 1, depth: "any", container: true, endsWith: null
+        });
         rules.push({ re: /^\s*(?:public|private|internal|protected|data|sealed|enum|abstract|open|final|annotation|value|expect|actual)?\s*(?:enum\s+)?(?:class|interface|object)\s+([A-Za-z_]\w*)/, kind: (m) => m[0].includes("interface") ? "interface" : "class", nameGroup: 1, depth: "any", container: true, endsWith: null });
         // 扩展函数：`fun String.pad()` → 方法 pad，container String
         rules.push({ re: /^\s*(?:public|private|internal|protected|suspend|inline|tailrec|operator|infix|override|abstract|open|final|external)?\s*(?:<[^>]*>\s*)?fun\s+(?:<[^>]*>\s*)?(?:([A-Za-z_][\w.]*(?:<[^>]*>)?)\.)?([A-Za-z_]\w*)/, kind: (m, d) => d > 0 ? "method" : "function", nameGroup: 2, depth: "any", container: false, endsWith: null, containerOf: (m) => m[1] });

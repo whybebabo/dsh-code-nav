@@ -798,6 +798,46 @@ test("F15：composer 明确拒绝时提示 insertRefused，而不是无 chip 通
   assert.deepEqual(h.calls.notify, [{ level: "error", text: "selection.insertRefused" }]);
 });
 
+// ---------- CLIENT-2：冻结相位（sending / submitting / adjudicating） ----------
+
+test("CLIENT-2：冻结相位下 insertSelection 一个字节都不写", () => {
+  // 宿主只给 insertReference 加了相位守卫，actions.insertText 与事件通道都没有：
+  // 旧实现会先补一个分隔空格、再把围栏块写进正在发送的草稿，还上报成功。
+  for (const phase of ["sending", "submitting", "adjudicating"]) {
+    const h = makeHarness({ input: { draft: "hello", phase: phase } });
+    const before = h.input.state.getSnapshot();
+    assert.equal(h.runtime.insertSelection(h.ctx, h.sessionId, SAMPLE), false, phase);
+    assert.equal(h.input.state.getSnapshot().draft, before.draft, phase + "：草稿内容不能被改动");
+    assert.equal(h.input.state.getSnapshot().draftRev, before.draftRev, phase + "：不能产生任何编辑版本");
+    assert.deepEqual(h.calls.insertText, [], phase + "：不能写分隔空格");
+    assert.deepEqual(h.calls.insertReference, [], phase + "：不能调 insertReference");
+    assert.deepEqual(h.calls.setDraft, [], phase + "：不能整串回写草稿");
+    assert.deepEqual(h.state.events, [], phase + "：不能走公开事件通道");
+    assert.deepEqual(h.calls.notify, [{ level: "error", text: "selection.insertRefused" }], phase);
+  }
+});
+
+test("CLIENT-2：可编辑相位（plain / claimed / 无 phase 的旧宿主）照常插入", () => {
+  for (const phase of ["plain", "claimed", undefined]) {
+    const h = makeHarness({ input: { draft: "hello", phase: phase } });
+    assert.equal(h.runtime.insertSelection(h.ctx, h.sessionId, SAMPLE), true, String(phase));
+    assert.ok(h.calls.insertReference.length > 0 || h.calls.insertText.length > 0, String(phase));
+    assert.deepEqual(h.calls.notify, [], String(phase));
+  }
+});
+
+test("CLIENT-2：读不到快照时按「不是冻结相位」处理（旧宿主兼容）", () => {
+  // 旧宿主没有 phase、或 getSnapshot 抛错：不能把插入整个拦死，继续走原有降级链。
+  const h = makeHarness({ input: { draft: "hello", phase: "sending" } });
+  h.input.state.getSnapshot = () => {
+    throw new Error("state unavailable");
+  };
+  assert.equal(h.runtime.insertSelection(h.ctx, h.sessionId, SAMPLE), true);
+  // 自包含 ref 仍可插入（读快照失败不等于冻结）
+  assert.equal(h.calls.insertReference.length, 1);
+  assert.deepEqual(h.calls.notify, []);
+});
+
 test("F16：quoteId 优先 crypto.randomUUID，退化时是 n + 8 位随机", () => {
   const real = makeRuntime(makeStorage(), globalThis.crypto);
   const a = real.quoteId(3);

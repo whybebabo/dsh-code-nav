@@ -112,28 +112,131 @@ test("file-chunks: chunkFromRead drops the boundary separator but keeps EOF's fi
 	assert.equal(mid.text, "a\nb");
 	assert.deepEqual(mid.lines, ["a", "b"]);
 	assert.equal(mid.endsWithBreak, true);
+	assert.equal(mid.pending, "");
 
 	const crlf = chunkFromRead("a\r\nb\r\n", 6, false);
 	assert.equal(crlf.text, "a\r\nb");
 	assert.deepEqual(crlf.lines, ["a", "b"]);
+	assert.equal(crlf.pending, "");
 
 	const tail = chunkFromRead("a\nb\n", 4, true);
 	assert.equal(tail.text, "a\nb\n");
 	assert.deepEqual(tail.lines, ["a", "b", ""]);
+	assert.equal(tail.pending, "");
 
+	// 非 eof 页不以换行结尾 = 页面停在一行中间（宿主只在页里没有换行时才这样返回）：
+	// 最后那段不是一行，不能当成整行产出，否则行号从接缝处开始漂（PREVIEW-1）。
 	const noBreak = chunkFromRead("a\nb", 3, false);
-	assert.equal(noBreak.text, "a\nb");
-	assert.deepEqual(noBreak.lines, ["a", "b"]);
+	assert.equal(noBreak.text, "a", "只有最后一个换行之前的 'a' 是完整行");
+	assert.deepEqual(noBreak.lines, ["a"]);
 	assert.equal(noBreak.endsWithBreak, false);
+	assert.equal(noBreak.pending, "b", "跨页半行必须留给下一页");
+});
+
+test("file-chunks: a carry from the previous page completes the line once the break arrives", () => {
+	// 上一页停在 "ab" 中间，下一页从 "c\n" 开始：拼起来才是完整的一行 "abc"。
+	const paged = chunkFromRead("c\nnext\n", 8, false, "ab");
+	assert.equal(paged.raw, "abc\nnext\n", "raw 是拼好的本块文本（含 carry）");
+	assert.deepEqual(paged.lines, ["abc", "next"]);
+	assert.equal(paged.text, "abc\nnext");
+	assert.equal(paged.pending, "");
+
+	// 整页依然没有换行：一行都不产出，全部继续留给下一页。
+	const still = chunkFromRead("def", 6, false, "abc");
+	assert.deepEqual(still.lines, []);
+	assert.equal(still.text, "");
+	assert.equal(still.pending, "abcdef");
+
+	// EOF 时才把 pending 补成最后一行（没有结尾换行也是完整的一行）。
+	const done = chunkFromRead("def", 6, true, "abc");
+	assert.deepEqual(done.lines, ["abcdef"]);
+	assert.equal(done.pending, "");
+
+	// CRLF 恰好被页边界劈开：carry 带 "\r"，下一页以 "\n" 开头，拼起来仍是 CRLF。
+	const crlf = chunkFromRead("\nb\r\n", 5, false, "a\r");
+	assert.deepEqual(crlf.lines, ["a", "b"]);
+	assert.equal(crlf.pending, "");
 });
 
 test("file-chunks: empty and out-of-range reads stay EOF", () => {
-	assert.deepEqual(planChunk("", 0, 8), { text: "", raw: "", lines: [], nextOffset: 0, eof: true, endsWithBreak: false });
+	assert.deepEqual(planChunk("", 0, 8), { text: "", raw: "", lines: [], nextOffset: 0, eof: true, endsWithBreak: false, pending: "" });
 	const past = planChunk("abc", 99, 8);
 	assert.equal(past.eof, true);
 	assert.deepEqual(past.lines, []);
+	assert.equal(past.pending, "");
 	assert.equal(chunkFromRead("", 12, true).eof, true);
 	assert.deepEqual(chunkFromRead("", 12, true).lines, []);
+	// 空页 + 非空 carry：不能把 carry 丢掉，也不能多产出一行
+	const kept = chunkFromRead("", 12, false, "half");
+	assert.deepEqual(kept.lines, []);
+	assert.equal(kept.pending, "half");
+});
+
+/** 复刻宿主 `fs.readPage`：128 KiB 窗口，裁到最后一个换行；窗口里没有换行就原样返回。 */
+function hostReadPage(bytes, offset, pageBytes) {
+	const size = bytes.length;
+	if (offset >= size) return { text: "", nextOffset: size, eof: true };
+	const length = Math.min(pageBytes, size - offset);
+	let slice = bytes.subarray(offset, offset + length);
+	let nextOffset = offset + length;
+	if (nextOffset < size) {
+		const lastBreak = slice.lastIndexOf(0x0a);
+		if (lastBreak >= 0) {
+			slice = slice.subarray(0, lastBreak + 1);
+			nextOffset = offset + lastBreak + 1;
+		}
+	}
+	return { text: slice.toString("utf8"), nextOffset: nextOffset, eof: nextOffset >= size };
+}
+
+/** 修复前的 chunkFromRead：不认「页停在一行中间」，每个未裁剪的页都当完整行。 */
+function legacyChunkFromRead(text, eof) {
+	const raw = typeof text === "string" ? text : "";
+	if (raw === "") return [];
+	if (eof === true) return raw.split(/\r?\n/);
+	const lines = raw.split(/\r?\n/);
+	if (raw.charCodeAt(raw.length - 1) === 10 && lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+	return lines;
+}
+
+test("file-chunks: a >5MB paged file with a 300 KiB single line keeps every line and line number", () => {
+	const PAGE_BYTES = 128 * 1024;
+	// > 5 MiB（宿主走分页）且含 300 KiB 单行 + 更长的 4.8 MiB 单行：两行都比一页大，
+	// 每页都「整页没有换行」，宿主原样返回、由客户端拼接（PREVIEW-1 的最小复现）。
+	const content = "a".repeat(Math.ceil(4.8 * 1024 * 1024))
+		+ "\n" + "b".repeat(300 * 1024)
+		+ "\nshort line\nlast\n";
+	const bytes = Buffer.from(content, "utf8");
+	assert.ok(bytes.length > 5 * 1024 * 1024, "夹具必须真的超过 5MiB，否则生产上走的是内存路径");
+
+	const truth = content.split(/\r?\n/);
+	const lines = [];
+	const naive = [];
+	let offset = 0;
+	let pending = "";
+	let eof = false;
+	let pages = 0;
+	while (!eof) {
+		const page = hostReadPage(bytes, offset, PAGE_BYTES);
+		const piece = chunkFromRead(page.text, page.nextOffset, page.eof === true, pending);
+		// 旧逻辑：不接 carry，把每个「无换行的页」当成完整行
+		naive.push(...legacyChunkFromRead(page.text, page.eof === true));
+		pages += 1;
+		pending = piece.pending;
+		lines.push(...piece.lines);
+		assert.ok(piece.nextOffset > offset, "偏移必须严格前进（否则分页器会原地打转）");
+		offset = piece.nextOffset;
+		eof = piece.eof;
+	}
+	assert.ok(pages > 40, ">5MiB 且含两行超页长的行：至少几十页，实际 " + pages);
+	assert.deepEqual(lines, truth, "拼接后的行内容/行数必须与整文件 split(/\\r?\\n/) 完全一致");
+	assert.equal(lines.length, truth.length);
+	// before/after：旧逻辑把两行超长行拆成 40 多段假行、后面每一行的行号整体后移
+	assert.ok(naive.length > truth.length, "旧逻辑（不拼 carry）会把长行拆成假行：" + naive.length + " vs " + truth.length);
+	const naiveShortLine = naive.indexOf("short line") + 1;
+	assert.ok(naiveShortLine > 3, "旧逻辑把「short line」显示成第 " + naiveShortLine + " 行（真实是第 3 行）");
+	assert.equal(lines.indexOf("short line") + 1, 3, "拼接后「short line」是第 3 行");
+	assert.equal(lines.indexOf("last") + 1, 4, "拼接后「last」是第 4 行");
 });
 
 test("file-chunks: bundle ships the pager wiring, not whole-file tokenization", () => {

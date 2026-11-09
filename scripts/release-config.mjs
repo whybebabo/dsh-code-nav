@@ -14,7 +14,7 @@ import { readFileSync, readdirSync, existsSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { gunzipSync } from "node:zlib";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, relative, isAbsolute } from "node:path";
 import { fileURLToPath } from "node:url";
 
 /** 仓库根目录。 */
@@ -315,26 +315,61 @@ function sha256Of(value) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+/** 文本判定：含 NUL 字节视为二进制；本仓库打包的运行期文件都是 UTF-8 文本。 */
+function isTextBuffer(buffer) {
+  return buffer.indexOf(0) === -1;
+}
+
 /**
- * 校验发布产物是否由**当前这棵树**生成（审查 P0-1 的正式修复）。
+ * 文件内容是否等价：文本按 CRLF/CR→LF 归一后比较（同一份内容在 Windows 的
+ * `core.autocrlf` / 编辑器下是 CRLF，而 npm pack 原样打包工作区字节，不归一就会
+ * 把「只是换行符不同」误判成不一致）；二进制（含 NUL）按原始字节比较。
+ * @param {Buffer} a
+ * @param {Buffer} b
+ * @returns {boolean}
+ */
+function sameFileContent(a, b) {
+  if (isTextBuffer(a) && isTextBuffer(b)) {
+    const normalize = (buffer) => buffer.toString("utf8").replace(/\r\n?/g, "\n");
+    return normalize(a) === normalize(b);
+  }
+  return a.equals(b);
+}
+
+/**
+ * 校验发布产物是否由**当前这棵树**生成（审查 P0-1 / REL-1 的正式修复）。
  *
- * 检查两件事：
+ * 检查三件事：
  * 1. tarball 内 `package/package.json` 的 `version` 必须等于 `version` 参数
  *    （挡住「把旧版本的包改名成当前版本」）；
  * 2. tarball 内 `package/lib/client.js` 的 sha256 必须等于 `buildCode` 的 sha256
- *    （挡住「pack 之后又改了源码/模板」）。
+ *    （挡住「pack 之后又改了源码/模板」）；
+ * 3. 传入 `root` 时，tarball 内**每一个普通文件**（不只 lib/client.js）都必须与
+ *    工作区同名文件内容一致，文本按 CRLF→LF 归一后比较。只比对 client.js 时，
+ *    pack 之后修改 `lib/index.js`（host 入口）/ `cordis.patch.yml`（bundle 补丁）/
+ *    两份 README 会漏检：产物照样报 fresh，但附件里的入口或补丁已与 tag 指向的
+ *    源码不一致（REL-1）。
  *
  * 刻意**不抛业务错误**：返回 `{fresh, reasons}`，调用方决定打印/退出 ——
  * live 发布必须据此拒绝，dry-run 只打印而不改变 exit 0。只有参数类型错误才抛。
  *
- * @param {{tgzPath:string, version:string, buildCode:string}} options
+ * `root` 可选：fixture / 纯函数测试没有工作区可比，省略时只做第 1、2 项，保持
+ * 旧调用方式与返回字段不变（`tarballSha256` 仍是 client.js 的哈希）。
+ *
+ * @param {{tgzPath:string, version:string, buildCode:string, root?:string|null}} options
  * @returns {{fresh:boolean, reasons:string[], tgzPath:string, expectedVersion:string,
- *   tarballVersion:string|null, expectedSha256:string, tarballSha256:string|null}}
+ *   tarballVersion:string|null, expectedSha256:string, tarballSha256:string|null,
+ *   worktreeRoot:string|null, files:Array<{path:string,tarballSha256:string,
+ *   worktreeSha256:string,status:"same"|"different"}>, mismatchedFiles:string[]}}
  */
-export function checkArtifactFreshness({ tgzPath, version, buildCode } = {}) {
+export function checkArtifactFreshness({ tgzPath, version, buildCode, root = null } = {}) {
   if (typeof tgzPath !== "string" || tgzPath.length === 0) throw new TypeError("checkArtifactFreshness: tgzPath 必须是非空字符串");
   if (typeof version !== "string" || version.length === 0) throw new TypeError("checkArtifactFreshness: version 必须是非空字符串");
   if (typeof buildCode !== "string" || buildCode.length === 0) throw new TypeError("checkArtifactFreshness: buildCode 必须是非空字符串");
+  if (root !== null && root !== undefined && (typeof root !== "string" || root.length === 0)) {
+    throw new TypeError("checkArtifactFreshness: root 如果传入，必须是非空字符串");
+  }
+  const worktreeRoot = root === null || root === undefined ? null : resolve(root);
   const result = {
     fresh: false,
     reasons: [],
@@ -343,6 +378,9 @@ export function checkArtifactFreshness({ tgzPath, version, buildCode } = {}) {
     tarballVersion: null,
     expectedSha256: sha256Of(buildCode),
     tarballSha256: null,
+    worktreeRoot,
+    files: [],
+    mismatchedFiles: [],
   };
   let tgzBuffer;
   try {
@@ -384,6 +422,54 @@ export function checkArtifactFreshness({ tgzPath, version, buildCode } = {}) {
         "tarball 内 lib/client.js 与当前构建不一致（tarball " + result.tarballSha256.slice(0, 12) +
         "… ≠ 当前 " + result.expectedSha256.slice(0, 12) + "…）"
       );
+    }
+  }
+  // 3) 逐文件校验：tarball 里每个普通文件都必须与工作区同名文件一致。
+  //    这是 REL-1 的修复：只比 client.js 会漏掉 lib/index.js / cordis.patch.yml /
+  //    README 等「没有内联进 bundle」的文件，pack 之后再改它们仍会被判 fresh。
+  //    readTgzEntries 只收普通文件（typeflag '0'/'7'），目录 / 链接 / PAX 头已过滤。
+  if (worktreeRoot !== null) {
+    const members = [...entries.keys()]
+      .filter((name) => name === "package" || name.startsWith("package/"))
+      .map((name) => ({ member: name, path: name.replace(/^package\/?/, "") }))
+      .filter(({ path }) => path.length > 0)
+      .sort((a, b) => a.path.localeCompare(b.path));
+    for (const { member, path } of members) {
+      const absolute = resolve(worktreeRoot, path);
+      const fromRoot = relative(worktreeRoot, absolute);
+      // 防目录穿越：tarball 成员路径解析后必须仍在工作区内。
+      if (fromRoot === "" || fromRoot.startsWith("..") || isAbsolute(fromRoot)) {
+        result.reasons.push("tarball 里的成员路径越出包根：" + member);
+        result.mismatchedFiles.push(path);
+        continue;
+      }
+      const tarballBuffer = entries.get(member);
+      let worktreeBuffer;
+      try {
+        worktreeBuffer = readFileSync(absolute);
+      } catch (error) {
+        result.reasons.push(
+          "tarball 里的 " + path + " 在工作区不存在（" +
+          String(error && error.code ? error.code : error) + "）"
+        );
+        result.mismatchedFiles.push(path);
+        continue;
+      }
+      const record = {
+        path,
+        tarballSha256: sha256Of(tarballBuffer),
+        worktreeSha256: sha256Of(worktreeBuffer),
+        status: "same",
+      };
+      if (!sameFileContent(tarballBuffer, worktreeBuffer)) {
+        record.status = "different";
+        result.mismatchedFiles.push(path);
+        result.reasons.push(
+          "tarball 里的 " + path + " 与工作区不一致（tarball " + record.tarballSha256.slice(0, 12) +
+          "… ≠ 工作区 " + record.worktreeSha256.slice(0, 12) + "…）"
+        );
+      }
+      result.files.push(record);
     }
   }
   result.fresh = result.reasons.length === 0;

@@ -261,14 +261,18 @@ function isXmlNameStart(ch) {
 }
 
 /**
- * XML 行内 run 分词器。保留「标签内 / 标签外」与「下一个名字是元素名」两个状态
- * （闭包按行创建，故状态只在行内有效）：元素名 → c-tag，属性名 → c-attr，
- * 引号里的属性值由外层状态机切成 c-string，标签外的文本内容留白。
+ * XML 行内 run 分词器。保留「标签内 / 标签外」与「下一个名字是元素名」两个状态：
+ * 元素名 → c-tag，属性名 → c-attr，引号里的属性值由外层状态机切成 c-string，
+ * 标签外的文本内容留白。
+ *
+ * 状态以 `{ inTag, expectName }` 传入 / 读出，因此可以跨行、也可以跨 chunk
+ * （属性可以换行写、开标签可以在块边界处被切开）。
+ * @param {{inTag?:boolean, expectName?:boolean}} [initial]
  * @returns {(code:string)=>Array<{text:string, cls:string}>}
  */
-function makeXmlRunner() {
-  let inTag = false;
-  let expectName = false;
+function makeXmlRunner(initial) {
+  let inTag = initial !== undefined && initial !== null && initial.inTag === true;
+  let expectName = initial !== undefined && initial !== null && initial.expectName === true;
   const run = (code) => {
     const segs = [];
     const n = code.length;
@@ -325,6 +329,7 @@ function makeXmlRunner() {
     return segs;
   };
   run.isInTag = () => inTag;
+  run.expectName = () => expectName;
   return run;
 }
 
@@ -816,28 +821,91 @@ function markTokenizeTruncated(lines) {
   return lines;
 }
 
+/** 跨块分词状态的版本号。结构变化时递增；旧版本状态按「无效」处理，重新从文件开头开始。 */
+const TOKENIZE_STATE_VERSION = 1;
+
 /**
- * 分词整个文件。
+ * 新建一个「文件开头」的跨块分词状态。
  *
- * 超过 500,000 字符只分词前面部分（防御性上限，宿主已经把文件大小当自己的
- * 职责，这一刀是本插件自己的），但返回数组上会挂非枚举 `truncated: true`
- * —— 客户端必须能说出「文件尾部没有参与渲染 / 查找 / 大纲」。
- * @param {string} text 文件内容
- * @param {string} lang 语言 id（LANG_META 键）
- * @returns {Array<{raw:string, segs:Array<{text:string, cls:string}>}> | null} 每行结果
- *   （`truncated === true` 表示内容被 500KB 上限截断）；语言未知或内容非法返回 null
+ * 所有字段都是 JSON 可序列化的原始值：不含函数 / DOM / Map，也不持有任何 chunk
+ * 文本的引用（Lua 长注释的闭定界符是普通字符串值，不是原文本的切片视图）。
+ * @returns {{
+ *   v:number, blockDepth:number, luaLongEnd:string,
+ *   inTriple:boolean, tripleEnd:string,
+ *   inString:boolean, stringEnd:string, stringEscape:boolean, stringDoubled:boolean,
+ *   xmlInTag:boolean, xmlExpectName:boolean,
+ *   yamlScalarIndent:number, propertiesContinued:boolean
+ * }}
  */
-export function tokenizeLines(text, lang) {
+function freshTokenizeState() {
+  return {
+    v: TOKENIZE_STATE_VERSION,
+    blockDepth: 0,             // 块注释嵌套深度（0 表示不在注释里）
+    luaLongEnd: "",            // Lua 长注释进行中时其闭定界符
+    inTriple: false,           // 跨行长字符串 / CDATA 进行中
+    tripleEnd: "",             // 其闭定界符
+    inString: false,           // 跨行普通字符串进行中
+    stringEnd: "",             // 其闭定界符
+    stringEscape: false,       // 续行中反斜杠是否转义
+    stringDoubled: false,      // 续行中连写闭定界符是否表示字面定界符（C# `""`）
+    xmlInTag: false,           // XML：是否在标签内
+    xmlExpectName: false,      // XML：下一个名字是否元素名
+    yamlScalarIndent: -1,      // YAML 块标量父键缩进（-1 表示不在块标量正文里）
+    propertiesContinued: false // properties 续行（行尾奇数个反斜杠）
+  };
+}
+
+/**
+ * 调用方传入的状态是否可用。
+ *
+ * 除了字段类型，还要拒绝「进行中但闭定界符为空」的组合：`inTriple` / `inString`
+ * 的闭定界符为空时，`indexOf("")` 会一直命中当前列，行扫描原地死循环。
+ * 非普通对象（Map / 数组 / class 实例）与旧版本一律视为无效 → 从文件开头开始。
+ * @param {unknown} state
+ * @returns {boolean}
+ */
+function isValidTokenizeState(state) {
+  if (state === null || typeof state !== "object" || Array.isArray(state)) return false;
+  const proto = Object.getPrototypeOf(state);
+  if (proto !== Object.prototype && proto !== null) return false;
+  if (state.v !== TOKENIZE_STATE_VERSION) return false;
+  return Number.isInteger(state.blockDepth) && state.blockDepth >= 0
+    && typeof state.luaLongEnd === "string"
+    && typeof state.inTriple === "boolean"
+    && typeof state.tripleEnd === "string"
+    && (!state.inTriple || state.tripleEnd.length > 0)
+    && typeof state.inString === "boolean"
+    && typeof state.stringEnd === "string"
+    && (!state.inString || state.stringEnd.length > 0)
+    && typeof state.stringEscape === "boolean"
+    && typeof state.stringDoubled === "boolean"
+    && typeof state.xmlInTag === "boolean"
+    && typeof state.xmlExpectName === "boolean"
+    && Number.isInteger(state.yamlScalarIndent)
+    && typeof state.propertiesContinued === "boolean";
+}
+
+/**
+ * 分词实现：`tokenizeLines` 与 `tokenizeLinesWithState` 共用同一条状态机。
+ *
+ * @param {unknown} text
+ * @param {unknown} lang
+ * @param {unknown} inputState `undefined` / 无效 → 从「文件开头」开始
+ * @returns {{lines:Array<{raw:string, segs:Array<{text:string, cls:string}>}>, state:object} | null}
+ */
+function tokenizeWithState(text, lang, inputState) {
   if (typeof text !== "string" || !Object.hasOwn(LANG_META, lang)) return null;
   const meta = LANG_META[lang];
-  const truncated = text.length > 500000; // 防御性上限
+  const truncated = text.length > 500000; // 防御性上限（每次调用单独计算）
   if (truncated) text = text.slice(0, 500000);
   const lines = text.split(/\r?\n/);
-  // Vue/Svelte 单文件组件：只有 script 块按 JS/TS 分词，模板 / 样式行留白
+  // Vue/Svelte 单文件组件：只有 script 块按 JS/TS 分词，模板 / 样式行留白。
+  // 流式状态不覆盖 SFC（整文件布局要先看到全部文本），按整块处理后返回空状态。
   if (meta.scriptBlocks === true) {
     const out = tokenizeScriptBlocks(text, lines);
-    return truncated ? markTokenizeTruncated(out) : out;
+    return { lines: truncated ? markTokenizeTruncated(out) : out, state: {} };
   }
+  const st = isValidTokenizeState(inputState) ? inputState : freshTokenizeState();
   const out = new Array(lines.length);
   const key = lang;
   const lineCmts = commentMarkers(meta);
@@ -852,24 +920,49 @@ export function tokenizeLines(text, lang) {
   // 跨行普通字符串规则（`{open, close, escape, doubled}`）：JS 模板串、Go 原始串、
   // C# 逐字串、XML 属性值。`close` 与开定界符可以不同（C# 开 `@"`、闭 `"`）。
   const multilineRules = normalizeMultilineRules(meta);
-  // XML 的标签内/外状态要跨行保持（属性可以换行写），故 runner 建在循环外
-  const xmlRun = meta.xmlTags === true ? makeXmlRunner() : null;
+  // XML 的标签内/外状态要跨行保持（属性可以换行写），故 runner 建在循环外，
+  // 并以传入状态（上一个 chunk 结束时的 XML 状态）初始化。
+  const xmlRun = meta.xmlTags === true
+    ? makeXmlRunner({ inTag: st.xmlInTag, expectName: st.xmlExpectName })
+    : null;
   // 配置文件是否需要对「键 / 段头」补上色
   const decorate = meta.keySep !== undefined || meta.sectionLines === true;
-  let blockDepth = 0;           // 块注释嵌套深度（0 表示不在注释里）
-  let luaLongEnd = "";          // Lua 长注释进行中时其结束定界符
-  let inTriple = false;         // 长字符串 / CDATA 进行中
-  let tripleEnd = "";           // 其结束定界符
-  let inString = false;
-  let stringEnd = "";           // 续行字符串的闭定界符
-  let stringEscape = false;     // 续行中反斜杠是否转义
-  let stringDoubled = false;    // 续行中连写闭定界符是否表示字面定界符（C# `""`）
+  let blockDepth = st.blockDepth;           // 块注释嵌套深度（0 表示不在注释里）
+  let luaLongEnd = st.luaLongEnd;           // Lua 长注释进行中时其结束定界符
+  let inTriple = st.inTriple;               // 长字符串 / CDATA 进行中
+  let tripleEnd = st.tripleEnd;             // 其结束定界符
+  let inString = st.inString;
+  let stringEnd = st.stringEnd;             // 续行字符串的闭定界符
+  let stringEscape = st.stringEscape;       // 续行中反斜杠是否转义
+  let stringDoubled = st.stringDoubled;     // 续行中连写闭定界符是否表示字面定界符（C# `""`）
   // YAML 块标量：父键缩进（>=0 表示正文中），正文行不参与键装饰
-  let yamlScalarIndent = -1;
+  let yamlScalarIndent = st.yamlScalarIndent;
   // properties 续行（Java properties：行尾奇数个反斜杠 → 下一行是上一键的值）。
   // 与 config-outline.js 的 `continued` 状态完全同口径，避免「大纲算值、高亮算键」。
   const trackContinuation = meta.keyContinuation === true;
-  let propertiesContinued = false;
+  let propertiesContinued = st.propertiesContinued;
+  /** 当前状态快照（新对象；跨 chunk 调用方拿到的是值拷贝，不是内部引用）。 */
+  const readState = () => ({
+    v: TOKENIZE_STATE_VERSION,
+    blockDepth,
+    luaLongEnd,
+    inTriple,
+    tripleEnd,
+    inString,
+    stringEnd,
+    stringEscape,
+    stringDoubled,
+    xmlInTag: xmlRun === null ? false : xmlRun.isInTag(),
+    xmlExpectName: xmlRun === null ? false : xmlRun.expectName(),
+    yamlScalarIndent,
+    propertiesContinued
+  });
+  // 分块调用的常见形态是「块文本以行分隔符结尾」：split 会多出一个尾随空行
+  // （调用方通常像客户端 tokenizeChunk 那样把它丢掉）。那个空行在全文里并不存在，
+  // 若让它参与状态推进，properties 续行态会被误清除，所以状态取「最后一个真实行
+  // 结束时」的快照；返回的 lines 仍与 tokenizeLines 完全一致。
+  const endsWithBreak = text.length > 0 && text.charCodeAt(text.length - 1) === 10;
+  let stateBeforeLastLine = null;
   // JS 正则判定需要的「前一个有效字符 / 关键字」。`code` 是 rope，不能对每个 `/`
   // 做随机下标（会反复摊平字符串，长行退化成二次方），故增量维护；
   // 注释视为透明，字符串 / 数字之后视为值（`/` 是除法）。
@@ -892,6 +985,8 @@ export function tokenizeLines(text, lang) {
     }
     : () => {};
   for (let i = 0; i < lines.length; i++) {
+    // 尾随空行之前的状态快照（见上方 endsWithBreak 注释）
+    if (endsWithBreak && i === lines.length - 1) stateBeforeLastLine = readState();
     const raw = lines[i];
     // 行首本身是表达式位置（`/re/.test(x)` 常见于行首），故正则上下文按行重置
     if (trackRegex) { prevChar = ""; prevWord = ""; }
@@ -1155,5 +1250,57 @@ export function tokenizeLines(text, lang) {
     }
     out[i] = { raw, segs, str: longStringContinuation === true };
   }
-  return truncated ? markTokenizeTruncated(out) : out;
+  const state = stateBeforeLastLine !== null ? stateBeforeLastLine : readState();
+  return { lines: truncated ? markTokenizeTruncated(out) : out, state };
+}
+
+/**
+ * 分词整个文件。
+ *
+ * 超过 500,000 字符只分词前面部分（防御性上限，宿主已经把文件大小当自己的
+ * 职责，这一刀是本插件自己的），但返回数组上会挂非枚举 `truncated: true`
+ * —— 客户端必须能说出「文件尾部没有参与渲染 / 查找 / 大纲」。
+ * @param {string} text 文件内容
+ * @param {string} lang 语言 id（LANG_META 键）
+ * @returns {Array<{raw:string, segs:Array<{text:string, cls:string}>}> | null} 每行结果
+ *   （`truncated === true` 表示内容被 500KB 上限截断）；语言未知或内容非法返回 null
+ */
+export function tokenizeLines(text, lang) {
+  const result = tokenizeWithState(text, lang, undefined);
+  return result === null ? null : result.lines;
+}
+
+/**
+ * 带跨块状态的分词：大文件按块（行对齐）分词时，把上一块返回的 `state` 传进来，
+ * 块边界就不会重置跨行状态机（块注释 / 嵌套块注释 / 模板字符串 / 三引号 /
+ * C# 逐字串 / Go 原始串 / Lua 长注释 / XML 注释、CDATA、标签与属性 /
+ * YAML 块标量 / properties 续行）。
+ *
+ * `state` 是普通、JSON 可序列化的对象（可以 `JSON.parse(JSON.stringify(state))`
+ * 之后继续用），字段见 `freshTokenizeState()`；它只保存原始值与定界符字符串，
+ * 不引用任何 chunk 文本。传 `undefined` / 非法对象（非普通对象、旧版本、字段类型
+ * 不对、进行中却缺少闭定界符）时从「文件开头」开始。
+ *
+ * 分块约定（与 `src/file-chunks.js` 的 `planChunk` / `chunkFromRead` 一致）：
+ * - 块边界必须落在整行边界上（块之间不切开行文本）；
+ * - 非末块文本通常以行分隔符结尾。此时 `lines` 与 `tokenizeLines` 一样会多出
+ *   一个尾随空行（调用方按既有逻辑丢弃即可，客户端 `tokenizeChunk` 就是这么做的），
+ *   而返回的 `state` 是最后一个**真实行**结束时的状态——尾随空行在全文里并不存在，
+ *   不能让它推进状态（否则 properties 续行态会被误清除）；
+ * - 末块（eof）不再有「下一块」，直接使用完整返回的 `lines`。
+ *
+ * 对同一段文本，`tokenizeLinesWithState(text, lang).lines` 与
+ * `tokenizeLines(text, lang)` 完全一致（含 `.truncated` 标记）；差异只有状态。
+ *
+ * Vue/Svelte（SFC）不在流式范围内：仍按整块现有行为分词（`scriptBlocks` 需要看到
+ * 整个文件布局），并返回 `{}` 作为状态（客户端需另行处理 SFC 的块边界）。
+ *
+ * @param {string} text 本块文本（行对齐）
+ * @param {string} lang 语言 id（LANG_META 键）
+ * @param {object} [state] 上一块返回的状态；省略 / 非法 → 从文件开头开始
+ * @returns {{lines:Array<{raw:string, segs:Array<{text:string, cls:string}>, str?:boolean}>, state:object} | null}
+ *   语言未知或内容非法返回 null
+ */
+export function tokenizeLinesWithState(text, lang, state) {
+  return tokenizeWithState(text, lang, state);
 }

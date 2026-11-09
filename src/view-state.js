@@ -165,3 +165,77 @@ export function symbolsEmptyKind(hasSymbols, filteredLength, inWindowLength) {
 	const inWindow = typeof inWindowLength === "number" && Number.isFinite(inWindowLength) ? inWindowLength : -1;
 	return inWindow === 0 ? "window" : "filtered";
 }
+
+/**
+ * 「加载全部（解除上限）」控件该不该出现（PREVIEW-3）。
+ *
+ * 预览上限（MAX_PREVIEW_LINES）是软上限：`renderedCount = min(tokens, lineCap)`，
+ * 于是只有「已加载行数 > 上限」时才会出现**加载了却渲染不出来**的行。旧实现把
+ * 控件绑在 `atCap = !atEnd && renderedCount >= lineCap` 上：EOF 正好落在越过上限
+ * 的那一块时 `atEnd` 变真，footer 整条消失、header 的「全部加载」也跟着藏起来，
+ * 多出来的行永远看不到（只能靠一次搜索命中上限之外的行才能恢复）。
+ *
+ * 判据必须是**持久条件**而不是瞬时状态：只要上限没解除、并且（有行被挡住 或
+ * 上限仍然卡着还有后续内容），就得有一个可见的解除入口。
+ *
+ * 返回语义：
+ * - `hiddenLines`：已加载但被上限挡在渲染之外的行数（`lineCapped` 提示用）；
+ * - `showLift`：是否需要「解除上限」按钮（footer 上限行 / 头部 / beyondCap 提示）；
+ * - `showHeaderLoadAll`：分页预览说明行右侧的「全部加载」是否显示（只对分页态）；
+ * - `footerAtCap`：footer 是否要渲染「已加载 N 行（达到预览上限）+ 解除上限」
+ *   （与 showLift 同值；footer 整条是否出现还要看 loading / 下载链接等其它项）。
+ *
+ * @param {{tokensLength?:unknown, renderedCount?:unknown, lineCap?:unknown, capLifted?:unknown, atEnd?:unknown, paging?:unknown}} [signals]
+ * @returns {{hiddenLines:number, showLift:boolean, showHeaderLoadAll:boolean, footerAtCap:boolean}}
+ */
+export function capControls(signals = {}) {
+	const count = (value) => (typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0);
+	const tokensLength = count(signals.tokensLength);
+	const renderedCount = Math.min(count(signals.renderedCount), tokensLength);
+	const lineCap = count(signals.lineCap);
+	const capLifted = signals.capLifted === true;
+	const atEnd = signals.atEnd === true;
+	const paging = signals.paging === true;
+	const hiddenLines = tokensLength - renderedCount;
+	// 上限正在生效：渲染被压在 lineCap 上（解除后 lineCap 是 MAX_SAFE_INTEGER，不会命中）。
+	const capReached = lineCap > 0 && renderedCount >= lineCap;
+	// 「有行被挡住」或「上限还卡着、后面还有内容」都要给解除入口；与 atEnd 无关。
+	const showLift = !capLifted && (hiddenLines > 0 || (capReached && !atEnd));
+	// 分页态：上限解除前永远留一个「全部加载」；上限解除后只在还有后续内容时保留，
+	// 免得「正在加载全部内容…」的进度提示旁边还挂一个同名按钮。
+	const showHeaderLoadAll = paging && (showLift || (!capLifted && !atEnd));
+	return { hiddenLines, showLift, showHeaderLoadAll, footerAtCap: showLift };
+}
+
+/**
+ * 分页态后台扫描「为什么停」的派生状态（PREVIEW-4）。
+ *
+ * 旧实现只有一个 `capped`：命中上限（MAX_MATCHES=2000 条）和字节预算
+ * （SCAN_MAX_BYTES=64MB）共用它，于是「找到 2000 处就停」也报成「只扫描了前
+ * {limitBytes}」（limitBytes 是 min(文件大小, 预算)，与实际读到的字节无关）。
+ * 同时分页态的命中数组是扫描攒出来的普通数组，没有 `findMatches` 挂的非枚举
+ * `capped`，计数永远显示 `1/2000` 而不是 `1/2000+`。
+ *
+ * 这里把「停下来的原因」翻译成界面需要的三件事：提示文案键（hits / bytes 两句
+ * 完全不同）、是否还有更多命中（计数要带 `+`）、以及这次扫描是否以「被裁剪」
+ * 结束（`stopped`：只有它需要显示说明；扫到 EOF 的正常结束不算）。
+ * 兼容旧状态形状：`done && capped && 没有 cappedReason` 按字节预算处理。
+ *
+ * @param {{done?:unknown, capped?:unknown, cappedReason?:unknown}} [scan]
+ * @returns {{stopped:boolean, reason:"hits"|"bytes"|null, noticeKey:string|null, counterCapped:boolean}}
+ */
+export function scanStopState(scan) {
+	const stopped = scan !== null && scan !== undefined && scan.done === true;
+	const rawReason = scan !== null && scan !== undefined ? scan.cappedReason : undefined;
+	const legacyCapped = scan !== null && scan !== undefined && scan.capped === true;
+	if (!stopped) return { stopped: false, reason: null, noticeKey: null, counterCapped: false };
+	if (rawReason === "hits") {
+		// 命中上限：还有更靠后的命中没收集，计数必须带 `+`。
+		return { stopped: true, reason: "hits", noticeKey: "search.scanHitCap", counterCapped: true };
+	}
+	if (rawReason === "bytes" || legacyCapped) {
+		// 字节预算：文件还有一段没扫，但命中数组本身没有被截断到上限。
+		return { stopped: true, reason: "bytes", noticeKey: "search.scanCapped", counterCapped: false };
+	}
+	return { stopped: false, reason: null, noticeKey: null, counterCapped: false };
+}
