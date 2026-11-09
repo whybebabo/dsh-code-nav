@@ -90,4 +90,7 @@ test("search scan: the bundle searches the whole file, not the loaded window", (
 	assert.match(bundle, /const liftCap = \(\) =>/);
 	assert.match(bundle, /lineCapRef\.current = Number\.MAX_SAFE_INTEGER/);
 	assert.match(bundle, /paging\.liftCap/);
+	// 分页预览的说明行右侧也有「全部加载」（与宿主内置分页预览对齐）
+	assert.match(bundle, /cn-note-row/);
+	assert.match(bundle, /paging\.loadAllTitle/);
 });
