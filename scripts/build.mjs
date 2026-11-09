@@ -34,7 +34,7 @@ function readLf(file) {
   return readFileSync(file, "utf8").replace(/\r\n?/g, "\n");
 }
 /** 拼接顺序即依赖顺序（被依赖者在前，共享作用域里声明在前才能被引用）。 */
-export const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "draft-coords", "render-window", "view-state"];
+export const MODULES = ["lang-registry", "properties-key", "tokenize", "config-outline", "outline", "search", "selection", "draft-coords", "render-window", "file-chunks", "virtual-rows", "view-state"];
 export const EXPORTS = [
   "langOf", "langLabel", "LANG_EXT", "LANG_META",
   "tokenizeLines", "outlineOf", "outlineOfTokens", "kindGroup", "OUTLINE_MAX_SYMBOLS",
@@ -43,6 +43,9 @@ export const EXPORTS = [
   "CHIP_PLACEHOLDER", "detectTextOf", "needsLeadingSpace", "hasQuoteMarkers",
   "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow", "lineIsPlain",
   "clipToRenderWindow", "clipZeroBasedToRenderWindow",
+  "CHUNK_CHARS", "INITIAL_CHUNK_CHARS", "MAX_PREVIEW_LINES", "PLAIN_CHUNK_CHARS",
+  "lineCountOf", "planChunk", "chunkFromRead", "chunkNeedsPlain",
+  "ROW_HEIGHT", "OVERSCAN_ROWS", "NOMINAL_VIEW_HEIGHT", "rowWindow", "rowScrollTop",
   "themeIsDark", "lineWindowState", "matchWindowState", "symbolsEmptyKind"
 ];
 
