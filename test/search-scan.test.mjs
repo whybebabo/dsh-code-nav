@@ -84,6 +84,10 @@ test("search scan: the bundle searches the whole file, not the loaded window", (
 	assert.match(bundle, /sidebar\/api\/fs\.readPage/);
 	// 老路径：把匹配裁到「已加载的行数」—— 这正是「必须滚到才搜得到」的原因
 	assert.doesNotMatch(bundle, /clipZeroBasedToRenderWindow\(all, renderedCount\)/);
-	// 新路径：只按「预览上限」裁剪（超过上限的行根本不会被加载）
-	assert.match(bundle, /clipZeroBasedToRenderWindow\(rawMatches, __cn\.MAX_PREVIEW_LINES\)/);
+	// 新路径：按「可加载的行数上限」裁剪（默认 50,000，可手动解除）
+	assert.match(bundle, /clipZeroBasedToRenderWindow\(rawMatches, lineCap\)/);
+	// 预览上限是软上限：超出上限的命中可点「加载全部（解除上限）」
+	assert.match(bundle, /const liftCap = \(\) =>/);
+	assert.match(bundle, /lineCapRef\.current = Number\.MAX_SAFE_INTEGER/);
+	assert.match(bundle, /paging\.liftCap/);
 });

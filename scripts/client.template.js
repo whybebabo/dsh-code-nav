@@ -51,6 +51,9 @@ window.__ModuleLoader__.load({
 			".cn-mini{border:none;background:transparent;color:var(--cn-dim);cursor:pointer;border-radius:5px;font-size:12px;line-height:18px;padding:0 4px}",
 			".cn-mini:hover{color:var(--cn-accent)}",
 			".cn-mini.on{color:var(--cn-accent)}",
+			// 提示条里的「加载全部（解除上限）」按钮：与文案拉开一点、加载中禁用
+			".cn-warn .cn-mini,.cn-more-err .cn-mini{margin-left:8px;font-size:12px;color:var(--cn-accent)}",
+			".cn-mini:disabled{opacity:.55;cursor:default}",
 			// 宿主的全局样式常把 outline:none 套在 button 上，键盘用户就没了落点
 			".cn-chip:focus-visible,.cn-symbtn:focus-visible,.cn-mini:focus-visible,.cn-symclose:focus-visible,.cn-search input:focus-visible{outline:2px solid var(--cn-accent);outline-offset:1px}",
 			".cn-ico{width:14px;height:14px;display:inline-block;vertical-align:-2px;fill:currentColor}",
@@ -1339,7 +1342,7 @@ window.__ModuleLoader__.load({
 			"search.scanError": "全文搜索读取失败：{message}（已找到的匹配仍可跳转）",
 			"search.pendingJump": "当前匹配在第 {line} 行（已加载 {n} 行）：按 Enter 或「下一个」定位",
 			"search.jumping": "正在读取到第 {line} 行…（已加载 {n} 行）",
-			"search.beyondCap": "另有 {n} 处匹配在第 {cap} 行之后（超出预览上限），无法跳转",
+			"search.beyondCap": "另有 {n} 处匹配在第 {cap} 行之后（超出预览上限）",
 			"selection.add": "添加到对话",
 			"selection.added": "已添加到对话",
 			"selection.conflict": "输入框正忙或草稿已改动，请再点一次",
@@ -1358,10 +1361,12 @@ window.__ModuleLoader__.load({
 			"paging.loading": "正在加载…",
 			"paging.progress": "已加载 {n} / {total} 行",
 			"paging.loaded": "已加载 {n} 行",
-			"paging.capped": "已加载 {n} 行（达到预览上限）：下载后可查看完整内容",
+			"paging.capped": "已加载 {n} 行（达到预览上限）",
 			"paging.error": "读取下一页失败：{message}",
 			"paging.retry": "重试",
 			"paging.download": "下载文件",
+			"paging.liftCap": "加载全部（解除上限）",
+			"paging.lifting": "正在加载全部内容…已加载 {n} 行",
 			"linePlain": "有 {n} 行过长，已关闭这些行的语法高亮以保证滚动流畅（内容仍完整、可选中/查找）",
 			"lineNotRendered": "无法跳转到第 {line} 行：当前只加载了前 {n} 行",
 			"symbols.filteredEmpty": "当前筛选下没有符号",
@@ -1392,7 +1397,7 @@ window.__ModuleLoader__.load({
 			"search.scanError": "Whole-file search failed to read: {message} (matches found so far can still be jumped to)",
 			"search.pendingJump": "This match is on line {line} ({n} lines loaded): press Enter or Next to go there",
 			"search.jumping": "Reading up to line {line}… ({n} lines loaded)",
-			"search.beyondCap": "{n} more match(es) are past line {cap} (beyond the preview limit) and cannot be jumped to",
+			"search.beyondCap": "{n} more match(es) are past line {cap} (beyond the preview cap)",
 			"selection.add": "Add to conversation",
 			"selection.added": "Added to conversation",
 			"selection.conflict": "The composer is busy or the draft changed — click again",
@@ -1411,10 +1416,12 @@ window.__ModuleLoader__.load({
 			"paging.loading": "Loading…",
 			"paging.progress": "{n} / {total} lines loaded",
 			"paging.loaded": "{n} lines loaded",
-			"paging.capped": "{n} lines loaded (preview limit) — download the file to see the rest",
+			"paging.capped": "{n} lines loaded (preview cap reached)",
 			"paging.error": "Could not read the next page: {message}",
 			"paging.retry": "Retry",
 			"paging.download": "Download",
+			"paging.liftCap": "Load all (lift cap)",
+			"paging.lifting": "Loading everything… {n} lines loaded",
 			"linePlain": "{n} line(s) are too long, so syntax highlighting is off for them to keep scrolling responsive (content is intact and still selectable/searchable)",
 			"lineNotRendered": "Cannot jump to line {line}: only the first {n} lines are loaded",
 			"symbols.filteredEmpty": "No symbols match the current filter",
@@ -1725,6 +1732,15 @@ window.__ModuleLoader__.load({
 			const [loadError, setLoadError] = react.useState(null);
 			/** 是否已读到文件末尾（footer 据此收起「加载更多」）。 */
 			const [atEnd, setAtEnd] = react.useState(false);
+			/**
+			 * 预览行数上限（MAX_PREVIEW_LINES）默认是**软上限**：超过它的行不加载。
+			 * 但用户可以通过「加载全部（解除预览上限）」显式解除 —— 内存与分词时间
+			 * 随行数增长，所以必须让用户自己决定（虚拟滚动只保证 DOM 不炸）。
+			 */
+			const [capLifted, setCapLifted] = react.useState(false);
+			const lineCapRef = react.useRef(__cn.MAX_PREVIEW_LINES);
+			const lineCap = capLifted ? Number.MAX_SAFE_INTEGER : __cn.MAX_PREVIEW_LINES;
+			lineCapRef.current = lineCap;
 			/** 读取游标 + 代际：换文件时 gen++，在途响应据此丢弃。 */
 			const pageRef = react.useRef({ gen: 0, offset: 0, inflight: false });
 			const loadRef = react.useRef(null);
@@ -2034,7 +2050,7 @@ window.__ModuleLoader__.load({
 				try {
 					for (let n = 0; n < maxChunks; n += 1) {
 						if (state.gen !== gen) return;
-						if (chunkLineCount(chunksRef.current) >= __cn.MAX_PREVIEW_LINES) break;
+						if (chunkLineCount(chunksRef.current) >= lineCapRef.current) break;
 						const piece = hasContent
 							? __cn.planChunk(content, state.offset, __cn.CHUNK_CHARS)
 							: await readRemotePage(state.offset);
@@ -2053,6 +2069,26 @@ window.__ModuleLoader__.load({
 				}
 			};
 			loadRef.current = loadMore;
+
+			/**
+			 * 解除预览上限并加载剩余全部内容（「加载全部」按钮，类似宿主内置分页
+			 * 预览的「加载全部」）。这是**显式用户动作**：内存与分词时间随行数增长
+			 * （6 MB / 20 万行 ≈ 秒级 + 几十 MB），所以默认停在 MAX_PREVIEW_LINES。
+			 * 先改 lineCapRef 再调 loadMore：loadMore 的循环条件读 ref，不依赖下一次
+			 * 渲染才生效的闭包。
+			 */
+			const liftCap = () => {
+				lineCapRef.current = Number.MAX_SAFE_INTEGER;
+				setCapLifted(true);
+				if (!atEnd) void loadRef.current(pageRef.current.gen, Infinity);
+			};
+			// 解除上限后把剩余内容读完。放在 effect 里而不是只在 onClick 里：点击时
+			// 可能正好有一轮分页读取在途（loadMore 会被 inflight 守卫直接返回），
+			// 等它结束后这里接着读完；atEnd / loadError 一出现就停。
+			react.useEffect(() => {
+				if (!capLifted || atEnd || loading || loadError !== null) return;
+				void loadRef.current(pageRef.current.gen, Infinity);
+			}, [capLifted, atEnd, loading, loadError]);
 
 			// 分页态（>5 MB，宿主只给 `{size, largeFile}`）的**后台全文扫描**：
 			// 查找不能只覆盖「用户滚动加载到的那几行」——没人愿意为了搜一个词先滚到
@@ -2145,6 +2181,9 @@ window.__ModuleLoader__.load({
 				// 换文件后旧的查找定位目标不再有效
 				pendingJumpRef.current = null;
 				setSearchJump(null);
+				// 预览上限是「每个文件」的选择：换文件回到默认软上限
+				lineCapRef.current = __cn.MAX_PREVIEW_LINES;
+				setCapLifted(false);
 				if (!hasContent && pageUrl === null) {
 					setAtEnd(true);
 					return;
@@ -2185,7 +2224,7 @@ window.__ModuleLoader__.load({
 			// 渲染窗口是「能跳转的行号范围」的唯一来源：搜索与大纲都按它裁剪，
 			// 否则窗口外的匹配会被计入 n/m；窗口外的符号会出现在列表里却点不动。
 			const renderedCount = react.useMemo(
-				() => __cn.renderedLineCount(tokens.length, __cn.MAX_PREVIEW_LINES),
+				() => __cn.renderedLineCount(tokens.length, lineCap),
 				[tokens.length]
 			);
 			// DOM 渲染窗口：只挂视口附近的 ~100 行，其余用上下 padding 撑出滚动高度。
@@ -2249,10 +2288,10 @@ window.__ModuleLoader__.load({
 				return scan === null ? EMPTY_MATCHES : scan.matches;
 			}, [hasContent, content, deferredQuery, caseSensitive, scan]);
 			const matches = react.useMemo(() => {
-				const visible = __cn.clipZeroBasedToRenderWindow(rawMatches, __cn.MAX_PREVIEW_LINES);
+				const visible = __cn.clipZeroBasedToRenderWindow(rawMatches, lineCap);
 				if (rawMatches.capped === true) Object.defineProperty(visible, "capped", { value: true, enumerable: false });
 				return visible;
-			}, [rawMatches]);
+			}, [rawMatches, lineCap]);
 			const beyondCapCount = rawMatches.length - matches.length;
 			const scanning = paging && deferredQuery !== "" && scan !== null && scan.done !== true;
 			const scanError = scan !== null && scan.error !== null && scan.error !== undefined ? scan.error : null;
@@ -2332,7 +2371,7 @@ window.__ModuleLoader__.load({
 				if (!win.inWindow) {
 					// 行号可能还没加载到：继续读块，tokens 变化后这个 effect 会重跑。
 					// 只有确实到不了（EOF / 上限 / 读取失败）才提示并记下这一跳。
-					if (!atEnd && renderedCount < __cn.MAX_PREVIEW_LINES && loadError === null) {
+					if (!atEnd && renderedCount < lineCap && loadError === null) {
 						void loadRef.current(pageRef.current.gen, 1);
 						return;
 					}
@@ -2381,7 +2420,7 @@ window.__ModuleLoader__.load({
 					setSearchJump({ line: target, loaded: renderedCount, loading: false });
 					return;
 				}
-				if (!atEnd && renderedCount < __cn.MAX_PREVIEW_LINES && loadError === null) {
+				if (!atEnd && renderedCount < lineCap && loadError === null) {
 					setSearchJump({ line: target, loaded: renderedCount, loading: true });
 					void loadRef.current(pageRef.current.gen, 1);
 					return;
@@ -2556,8 +2595,8 @@ window.__ModuleLoader__.load({
 
 			// footer：进度 + 加载更多 / 全部加载 / 重试 / 下载。只在还有后续内容、
 			// 正在读、失败或到达上限时出现；普通小文件读完就不显示这条。
-			const showMore = !atEnd && !loading && loadError === null && renderedCount < __cn.MAX_PREVIEW_LINES;
-			const atCap = !atEnd && renderedCount >= __cn.MAX_PREVIEW_LINES;
+			const showMore = !atEnd && !loading && loadError === null && renderedCount < lineCap;
+			const atCap = !atEnd && renderedCount >= lineCap;
 			const progressText = totalLines === null
 				? t("paging.loaded").replace("{n}", String(tokens.length))
 				: t("paging.progress").replace("{n}", String(tokens.length)).replace("{total}", String(totalLines));
@@ -2591,7 +2630,19 @@ window.__ModuleLoader__.load({
 							}, "all")
 							: null,
 						atCap
-							? jsx("span", { className: "cn-more-err", children: t("paging.capped").replace("{n}", String(renderedCount)) }, "cap")
+							? jsxs("span", {
+								className: "cn-more-err",
+								children: [
+									jsx("span", { children: t("paging.capped").replace("{n}", String(renderedCount)) }, "text"),
+									jsx("button", {
+										type: "button",
+										className: "cn-mini",
+										disabled: loading,
+										onClick: liftCap,
+										children: loading ? t("paging.loading") : t("paging.liftCap")
+									}, "lift")
+								]
+							}, "cap")
 							: null,
 						downloadHref === null
 							? null
@@ -2769,9 +2820,27 @@ window.__ModuleLoader__.load({
 					scanError === null
 						? null
 						: jsx("div", { className: "cn-warn", role: "status", children: t("search.scanError").replace("{message}", scanError) }, "scanerror"),
-					// 匹配位于预览上限之外：列出来也跳不过去，单独计数（不冒充「无匹配」）。
+					// 匹配位于预览上限之外：给一个显式的「加载全部（解除上限）」按钮，
+					// 把剩下的行读完，匹配就变成可跳转的（宿主内置分页预览也有类似按钮）。
 					beyondCapCount > 0
-						? jsx("div", { className: "cn-warn", role: "status", children: t("search.beyondCap").replace("{n}", String(beyondCapCount)).replace("{cap}", String(__cn.MAX_PREVIEW_LINES)) }, "beyondcap")
+						? jsxs("div", {
+							className: "cn-warn",
+							children: [
+								jsx("span", { role: "status", children: t("search.beyondCap").replace("{n}", String(beyondCapCount)).replace("{cap}", String(__cn.MAX_PREVIEW_LINES)) }, "text"),
+								jsx("button", {
+									type: "button",
+									className: "cn-mini",
+									disabled: loading,
+									onClick: liftCap,
+									children: loading ? t("paging.loading") : t("paging.liftCap")
+								}, "lift")
+							]
+						}, "beyondcap")
+						: null,
+					// 解除上限后正在把剩余内容读完：顶部给一条可见的进度（footer 要在
+					// 内容末尾才看得到，用户此刻多半停在顶部）。
+					capLifted && !atEnd
+						? jsx("div", { className: "cn-note", role: "status", children: t("paging.lifting").replace("{n}", String(tokens.length)) }, "lifting")
 						: null,
 					// 当前匹配还没加载：提示按 Enter / 下一个定位，或正在续读到的进度。
 					searchJump === null
@@ -2806,7 +2875,7 @@ window.__ModuleLoader__.load({
 							setScrollTop((prev) => (el.scrollTop === prev ? prev : el.scrollTop));
 							setViewHeight((prev) => (el.clientHeight > 0 && el.clientHeight !== prev ? el.clientHeight : prev));
 							if (atEnd || loading || loadError !== null) return;
-							if (tokens.length >= __cn.MAX_PREVIEW_LINES) return;
+							if (tokens.length >= lineCapRef.current) return;
 							if (el.scrollTop + el.clientHeight >= el.scrollHeight - 480) {
 								void loadRef.current(pageRef.current.gen, 1);
 							}
