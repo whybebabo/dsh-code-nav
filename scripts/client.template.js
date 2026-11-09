@@ -1333,6 +1333,13 @@ window.__ModuleLoader__.load({
 			"search.prev": "上一个",
 			"search.next": "下一个",
 			"search.noMatch": "无匹配",
+			"search.scanning": "正在搜索整个文件…已扫描 {percent}%",
+			"search.scanningBytes": "正在搜索整个文件…已扫描 {mb}",
+			"search.scanCapped": "全文搜索只扫描了前 {mb}：更靠后的匹配未列出（可下载后搜索）",
+			"search.scanError": "全文搜索读取失败：{message}（已找到的匹配仍可跳转）",
+			"search.pendingJump": "当前匹配在第 {line} 行（已加载 {n} 行）：按 Enter 或「下一个」定位",
+			"search.jumping": "正在读取到第 {line} 行…（已加载 {n} 行）",
+			"search.beyondCap": "另有 {n} 处匹配在第 {cap} 行之后（超出预览上限），无法跳转",
 			"selection.add": "添加到对话",
 			"selection.added": "已添加到对话",
 			"selection.conflict": "输入框正忙或草稿已改动，请再点一次",
@@ -1344,7 +1351,7 @@ window.__ModuleLoader__.load({
 			"truncated": "文件过大，仅显示前 500KB",
 			"truncatedLines": "内容已截断到前 500KB（完整文件共 {total} 行）：查找与大纲只覆盖前 {n} 行",
 			"fileTooLarge": "文件过大（{size}），当前宿主既没有内联内容、也不支持分页读取",
-			"lineCapped": "文件过长，仅加载了前 {n} 行（共 {total} 行）：查找与大纲只覆盖已加载的行",
+			"lineCapped": "文件过长，只渲染了前 {n} 行（共 {total} 行）：查找覆盖全文，大纲只覆盖已加载的行",
 			"paging.remote": "超大文件（{size}），只读分页预览",
 			"paging.loadMore": "加载更多",
 			"paging.loadAll": "全部加载",
@@ -1357,7 +1364,6 @@ window.__ModuleLoader__.load({
 			"paging.download": "下载文件",
 			"linePlain": "有 {n} 行过长，已关闭这些行的语法高亮以保证滚动流畅（内容仍完整、可选中/查找）",
 			"lineNotRendered": "无法跳转到第 {line} 行：当前只加载了前 {n} 行",
-			"search.outsideWindow": "有匹配位于未加载的行（查找仅覆盖前 {n} 行）",
 			"symbols.filteredEmpty": "当前筛选下没有符号",
 			"symbols.outsideWindow": "符号都在未加载的行里（大纲只覆盖前 {n} 行）",
 			"code.aria": "代码内容",
@@ -1380,6 +1386,13 @@ window.__ModuleLoader__.load({
 			"search.prev": "Previous",
 			"search.next": "Next",
 			"search.noMatch": "No matches",
+			"search.scanning": "Searching the whole file… {percent}% scanned",
+			"search.scanningBytes": "Searching the whole file… {mb} scanned",
+			"search.scanCapped": "Whole-file search only scanned the first {mb}: later matches are not listed (download the file to search it all)",
+			"search.scanError": "Whole-file search failed to read: {message} (matches found so far can still be jumped to)",
+			"search.pendingJump": "This match is on line {line} ({n} lines loaded): press Enter or Next to go there",
+			"search.jumping": "Reading up to line {line}… ({n} lines loaded)",
+			"search.beyondCap": "{n} more match(es) are past line {cap} (beyond the preview limit) and cannot be jumped to",
 			"selection.add": "Add to conversation",
 			"selection.added": "Added to conversation",
 			"selection.conflict": "The composer is busy or the draft changed — click again",
@@ -1391,7 +1404,7 @@ window.__ModuleLoader__.load({
 			"truncated": "File too large — showing first 500KB",
 			"truncatedLines": "Content truncated to the first 500KB (the file has {total} lines): find and outline cover the first {n} lines only",
 			"fileTooLarge": "File is too large ({size}): the host provided no content and has no paged reader",
-			"lineCapped": "File is long — only the first {n} of {total} lines are loaded; find and outline cover loaded lines only",
+			"lineCapped": "File is long — only the first {n} of {total} lines are rendered; find covers the whole file, the outline covers loaded lines only",
 			"paging.remote": "Large file ({size}) — read-only paged preview",
 			"paging.loadMore": "Load more",
 			"paging.loadAll": "Load all",
@@ -1404,7 +1417,6 @@ window.__ModuleLoader__.load({
 			"paging.download": "Download",
 			"linePlain": "{n} line(s) are too long, so syntax highlighting is off for them to keep scrolling responsive (content is intact and still selectable/searchable)",
 			"lineNotRendered": "Cannot jump to line {line}: only the first {n} lines are loaded",
-			"search.outsideWindow": "Matches exist outside the loaded lines (find covers the first {n} lines only)",
 			"symbols.filteredEmpty": "No symbols match the current filter",
 			"symbols.outsideWindow": "All symbols are outside the loaded lines (outline covers the first {n} lines)",
 			"code.aria": "Code content",
@@ -1675,6 +1687,12 @@ window.__ModuleLoader__.load({
 			// 「上一处 / 下一处」的显式步进计数：单匹配时 curIndex 恒为 0，
 			// 只依赖序号的话 Enter 永远不滚（C-3）。
 			const [searchStep, setSearchStep] = react.useState(0);
+			/** 当前匹配还没加载到时的提示 / 续读进度（null = 无提示）。 */
+			const [searchJump, setSearchJump] = react.useState(null);
+			/** 上一轮 effect 见到的 searchStep：区分「用户按了上/下一处」与「只是改了查询」。 */
+			const lastStepRef = react.useRef(0);
+			/** 正在为哪一行续读（1 基；null = 没有在续读）。 */
+			const pendingJumpRef = react.useRef(null);
 			/** 插入成功后给读屏的播报文本（空串 = 无播报）。 */
 			const [insertAnnounce, setInsertAnnounce] = react.useState("");
 			const announceTimer = react.useRef(null);
@@ -1710,6 +1728,12 @@ window.__ModuleLoader__.load({
 			/** 读取游标 + 代际：换文件时 gen++，在途响应据此丢弃。 */
 			const pageRef = react.useRef({ gen: 0, offset: 0, inflight: false });
 			const loadRef = react.useRef(null);
+			/**
+			 * 分页态的后台全文扫描（只有 >5 MB、宿主只给 `{size, largeFile}` 时用）：
+			 * 按页读完文件、把命中攒起来，查找因此不必等用户滚动加载。null = 未扫描。
+			 */
+			const [scan, setScan] = react.useState(null);
+			const scanSeq = react.useRef(0);
 			/**
 			 * 渲染窗口（虚拟滚动）：只把视口附近的行挂进 DOM，其余行用 padding 撑高。
 			 * 大文件全部挂 DOM 时，宿主每次整页样式重算要为十几万个元素买单 ——
@@ -2030,6 +2054,76 @@ window.__ModuleLoader__.load({
 			};
 			loadRef.current = loadMore;
 
+			// 分页态（>5 MB，宿主只给 `{size, largeFile}`）的**后台全文扫描**：
+			// 查找不能只覆盖「用户滚动加载到的那几行」——没人愿意为了搜一个词先滚到
+			// 底。这里按页把整个文件读一遍、把命中攒起来，命中数随扫描进度增长。
+			//
+			// - 已加载的块先直接搜（用户可能已经滚过一段：已读过的页不再重读，命中
+			//   也能立刻出现），后台扫描只负责它后面的部分；
+			// - 输入停顿 180 ms 再开扫：否则每敲一个字符都从头重来；
+			// - 查询 / 大小写 / 文件变化时取消上一轮（seq 代际）；
+			// - SCAN_MAX_BYTES（默认 64 MB）是预算，扫到就停并让界面说明；
+			// - 扫描只收集「行/列」，不保留页文本，内存只与命中数相关。
+			react.useEffect(() => {
+				const seq = scanSeq.current + 1;
+				scanSeq.current = seq;
+				if (!paging || deferredQuery === "") {
+					setScan(null);
+					return undefined;
+				}
+				let cancelled = false;
+				let timerId = null;
+				const state = { matches: [], capped: false, lines: 0, offset: pageRef.current.offset };
+				// 已加载块逐块搜（不在拼接文本上搜：块边界是换行，拼接会制造跨块假命中）
+				for (const chunk of chunksRef.current) {
+					const found = __cn.findMatches(chunk.text, deferredQuery, { caseSensitive });
+					const merged = __cn.appendScannedMatches(state.matches, found, state.lines, __cn.MAX_MATCHES);
+					state.matches = merged.matches;
+					state.capped = state.capped || merged.capped;
+					state.lines += chunk.lines.length;
+				}
+				const reachedEnd = typeof sizeBytes === "number" && Number.isFinite(sizeBytes) && state.offset >= sizeBytes;
+				const initialDone = reachedEnd || state.capped;
+				setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: initialDone, error: null });
+				if (initialDone) return undefined;
+				timerId = setTimeout(() => {
+					void (async () => {
+						for (;;) {
+							if (cancelled || scanSeq.current !== seq) return;
+							if (state.offset >= __cn.SCAN_MAX_BYTES) {
+								setScan({ matches: state.matches.slice(), capped: true, scannedBytes: state.offset, done: true, error: null });
+								return;
+							}
+							let piece;
+							try {
+								piece = await readRemotePage(state.offset);
+							} catch (error) {
+								if (cancelled || scanSeq.current !== seq) return;
+								const message = error !== null && error !== undefined && error.message !== undefined ? String(error.message) : String(error);
+								setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: true, error: message });
+								return;
+							}
+							if (cancelled || scanSeq.current !== seq) return;
+							const found = __cn.findMatches(piece.text, deferredQuery, { caseSensitive });
+							const merged = __cn.appendScannedMatches(state.matches, found, state.lines, __cn.MAX_MATCHES);
+							state.matches = merged.matches;
+							state.capped = state.capped || merged.capped;
+							state.lines += piece.lines.length;
+							state.offset = piece.nextOffset;
+							const finished = piece.eof === true || state.capped;
+							setScan({ matches: state.matches.slice(), capped: state.capped, scannedBytes: state.offset, done: finished, error: null });
+							if (finished) return;
+						}
+					})();
+				}, 180);
+				return () => {
+					cancelled = true;
+					if (timerId !== null) clearTimeout(timerId);
+					// 让在途的下一页结果作废：只认自己这一轮
+					scanSeq.current += 1;
+				};
+			}, [paging, deferredQuery, caseSensitive, path, pageUrl]);
+
 			// 换文件 / 换路径：清空分块并加载首屏。这个 effect 在 paint 之后跑，
 			// 首屏会短暂显示「正在加载」—— 代价换来的是内存只与已加载的块成正比。
 			react.useEffect(() => {
@@ -2048,6 +2142,9 @@ window.__ModuleLoader__.load({
 				const bodyEl = codeRef.current;
 				if (bodyEl !== null) bodyEl.scrollTop = 0;
 				setScrollTop(0);
+				// 换文件后旧的查找定位目标不再有效
+				pendingJumpRef.current = null;
+				setSearchJump(null);
 				if (!hasContent && pageUrl === null) {
 					setAtEnd(true);
 					return;
@@ -2136,29 +2233,35 @@ window.__ModuleLoader__.load({
 					hasSymbols: all.length > 0
 				};
 			}, [symReady, tokens, lang, renderedCount]);
-			// 分页态没有完整 content：查找只覆盖已加载的行。块文本 join("\n") 与
-			// 行号口径一致（块内已去掉末尾分隔符，这里补回来）。
-			const loadedText = react.useMemo(() => {
-				if (!paging) return "";
-				let text = "";
-				for (let i = 0; i < chunks.length; i += 1) {
-					if (i > 0) text += "\n";
-					text += chunks[i].text;
+			// 查找覆盖**整个文件**，而不是「已经滚动加载到的那几行」：
+			// - ≤5 MB：宿主给了完整正文，直接在内存里搜（正文本来就在，没有任何理由
+			//   只搜已加载的部分）；
+			// - >5 MB：正文不在客户端，后台按页扫描（见上面的 scan effect），命中
+			//   随扫描进度增长。
+			// 命中还要再按「预览上限」裁一次：超过 MAX_PREVIEW_LINES 的行根本不会
+			// 被加载，列出来也跳不过去 —— 单独计数并提示（beyondCapCount）。
+			const rawMatches = react.useMemo(() => {
+				if (deferredQuery === "") return EMPTY_MATCHES;
+				if (hasContent) {
+					if (typeof content !== "string") return EMPTY_MATCHES;
+					return __cn.findMatches(content, deferredQuery, { caseSensitive });
 				}
-				return text;
-			}, [paging, chunks]);
-			const searchText = hasContent ? content : loadedText;
+				return scan === null ? EMPTY_MATCHES : scan.matches;
+			}, [hasContent, content, deferredQuery, caseSensitive, scan]);
 			const matches = react.useMemo(() => {
-				if (typeof searchText !== "string") return EMPTY_MATCHES;
-				const all = __cn.findMatches(searchText, deferredQuery, { caseSensitive });
-				const visible = __cn.clipZeroBasedToRenderWindow(all, renderedCount);
-				if (all.capped === true) Object.defineProperty(visible, "capped", { value: true, enumerable: false });
+				const visible = __cn.clipZeroBasedToRenderWindow(rawMatches, __cn.MAX_PREVIEW_LINES);
+				if (rawMatches.capped === true) Object.defineProperty(visible, "capped", { value: true, enumerable: false });
 				return visible;
-			}, [searchText, deferredQuery, caseSensitive, renderedCount]);
+			}, [rawMatches]);
+			const beyondCapCount = rawMatches.length - matches.length;
+			const scanning = paging && deferredQuery !== "" && scan !== null && scan.done !== true;
+			const scanError = scan !== null && scan.error !== null && scan.error !== undefined ? scan.error : null;
+			const scanCapped = scan !== null && scan.done === true && scan.capped === true;
+			const scanInfo = __cn.scanProgress(scan === null ? 0 : scan.scannedBytes, sizeBytes);
 			const curIndex = matches.length > 0 ? Math.min(cur, matches.length - 1) : -1;
 			// findMatches 只在确实探测到第 N+1 条时标记 capped。
 			const matchCapped = matches.capped === true;
-			// 计数口径：分母是可导航（裁剪后）条数；命中上限与渲染窗口两个裁剪
+			// 计数口径：分母是可导航（裁剪后）条数；命中上限与预览上限两个裁剪
 			// 分开表达，不能再把「窗口外还有」说成 n/2000+ 或「无匹配」。
 			const matchState = __cn.matchWindowState(matches.length, matchCapped, __cn.MAX_MATCHES);
 			// 内容行数超出渲染窗口：文件被截断显示，搜索与大纲只覆盖窗口内
@@ -2243,19 +2346,49 @@ window.__ModuleLoader__.load({
 				if (typeof onLineConsumed === "function") onLineConsumed();
 			}, [content, browsable, path, line, lineEnd, renderedCount, onLineConsumed, atEnd, loadError]);
 
-			// 当前匹配变化 → 滚动到该匹配（C-3 查找跟随）。
-			// 依赖「当前匹配是谁」（start）而不是序号：继续输入收紧查询时几乎总是
+			// 当前匹配变化 → 定位到该匹配（C-3 查找跟随）。
+			// 依赖「当前匹配是谁」（行:列）而不是序号：继续输入收紧查询时几乎总是
 			// curIndex 0→0，只依赖序号会让 matches 换了、当前匹配挪了行、视口却
 			// 停在旧位置。单匹配时 step() 的序号恒为 0，searchStep 显式再触发一次。
+			//
+			// 匹配可能在**还没加载**的行里（查找现在覆盖整个文件）：
+			// - 用户只是继续输入：只提示「第 N 行还没加载，按 Enter/下一个定位」，
+			//   不自动续读 —— 否则每敲一个字符都要读一轮分块；
+			// - 用户明确按了上/下一处 / Enter：逐块续读直到目标行已加载（每渲染一轮
+			//   读一块，界面不会卡），再滚过去。
 			const currentMatch = curIndex >= 0 ? matches[curIndex] : null;
 			const currentLine = currentMatch === null ? -1 : currentMatch.line;
 			const currentCol = currentMatch === null ? null : currentMatch.col;
-			const currentMatchStart = currentMatch === null ? -1 : currentMatch.start;
+			const currentMatchKey = currentMatch === null ? "" : currentMatch.line + ":" + currentMatch.col;
 			react.useEffect(() => {
-				if (curIndex < 0) return;
-				// 窗口化后当前匹配可能还没挂进 DOM，按行号滚（目标行随渲染窗口进来）。
-				scrollRowIntoView(currentLine + 1);
-			}, [curIndex, currentMatchStart, searchStep]);
+				if (curIndex < 0 || currentMatchKey === "") {
+					pendingJumpRef.current = null;
+					setSearchJump(null);
+					return;
+				}
+				const target = currentLine + 1;
+				const explicit = lastStepRef.current !== searchStep;
+				lastStepRef.current = searchStep;
+				if (target <= renderedCount) {
+					pendingJumpRef.current = null;
+					setSearchJump(null);
+					scrollRowIntoView(target);
+					return;
+				}
+				if (explicit) pendingJumpRef.current = target;
+				if (pendingJumpRef.current !== target) {
+					pendingJumpRef.current = null;
+					setSearchJump({ line: target, loaded: renderedCount, loading: false });
+					return;
+				}
+				if (!atEnd && renderedCount < __cn.MAX_PREVIEW_LINES && loadError === null) {
+					setSearchJump({ line: target, loaded: renderedCount, loading: true });
+					void loadRef.current(pageRef.current.gen, 1);
+					return;
+				}
+				pendingJumpRef.current = null;
+				setSearchJump({ line: target, loaded: renderedCount, loading: false });
+			}, [curIndex, currentMatchKey, searchStep, renderedCount, atEnd, loadError]);
 
 			// 下拉打开期间：全局 Esc 关闭（capture 阶段，不依赖焦点位置）。
 			// 关闭时把焦点还给触发按钮；IME 组合中的 Esc 属于输入法，不在这里吞掉。
@@ -2304,11 +2437,26 @@ window.__ModuleLoader__.load({
 
 			const step = (delta) => {
 				if (matches.length === 0) return;
+				// 当前匹配还没加载（查找覆盖整个文件之后很常见）：先把**这一条**
+				// 定位过来，不要直接跳到下一条 —— 用户看到的 n/m 会从「未定位」
+				// 悄悄变成另一处，反而更困惑。
+				const pendingLine = searchJump === null ? 0 : searchJump.line;
+				if (pendingLine > renderedCount) {
+					pendingJumpRef.current = pendingLine;
+					setSearchStep((n) => n + 1);
+					return;
+				}
 				setCur((c) => (c + delta + matches.length) % matches.length);
 				// 单匹配 / 同一处再按一次：序号不变也要滚（C-3）
 				setSearchStep((n) => n + 1);
 			};
-			const onQuery = (v) => { setQuery(v); setCur(0); };
+			const onQuery = (v) => {
+				setQuery(v);
+				setCur(0);
+				// 新查询从「未定位」开始：旧的 pending 续读目标不再有效
+				pendingJumpRef.current = null;
+				setSearchJump(null);
+			};
 			const onKeyDown = (e) => {
 				// IME 组合中的 Enter 属于输入法（Chrome 的 keyCode 229）：放行，
 				// 既不 preventDefault 也不跳匹配。
@@ -2487,10 +2635,11 @@ window.__ModuleLoader__.load({
 					}, "code");
 
 			// 计数文案：分母是可导航条数；outsideOnly 不再冒充「无匹配」，
-			// 由下面的「窗口外还有匹配」提示说明。
+			// 由下面的「预览上限之外」提示说明。
 			const matchCounterText = matchState.kind === "empty"
-				// 延后的查询值还没追上时别说「无匹配」
-				? (deferredQuery.length > 0 ? t("search.noMatch") : "")
+				// 延后的查询值还没追上时别说「无匹配」；后台还在扫描时也不能说；
+				// 命中全在预览上限之外时由下面的 beyondCap 提示说明，同样不冒充「无匹配」
+				? (deferredQuery.length > 0 && !scanning && beyondCapCount === 0 ? t("search.noMatch") : "")
 				: matchState.kind === "outsideOnly"
 					? ""
 					: (curIndex + 1) + "/" + matchState.total + (matchState.kind === "countCapped" ? "+" : "");
@@ -2591,7 +2740,8 @@ window.__ModuleLoader__.load({
 					truncated === true
 						? jsx("div", { className: "cn-warn", children: t("truncated") }, "truncated")
 						: null,
-					// 行数到达预览上限：查找与大纲只覆盖已加载的行。
+					// 行数到达预览上限：正文只渲染到上限，大纲只覆盖已加载的行
+					// （查找仍然覆盖整个文件，见下面的搜索提示）。
 					lineCapped === true
 						? jsx("div", { className: "cn-warn", children: t("lineCapped").replace("{n}", String(renderedCount)).replace("{total}", String(totalForText)) }, "linecapped")
 						: null,
@@ -2603,10 +2753,36 @@ window.__ModuleLoader__.load({
 					lineNotice !== null
 						? jsx("div", { className: "cn-warn", role: "status", children: t("lineNotRendered").replace("{line}", String(lineNotice.line)).replace("{n}", String(lineNotice.rendered)) }, "linenotice")
 						: null,
-					// 命中上限被渲染窗口裁掉：分母只数可导航的，窗口外的事实单独说。
-					matchState.outside === true
-						? jsx("div", { className: "cn-warn", role: "status", children: t("search.outsideWindow").replace("{n}", String(renderedCount)) }, "outside")
+					// 分页态后台搜索：进度 / 预算截断 / 读页失败。
+					scanning
+						? jsx("div", {
+							className: "cn-note",
+							role: "status",
+							children: sizeBytes === undefined
+								? t("search.scanningBytes").replace("{mb}", formatBytes(scan === null ? 0 : scan.scannedBytes))
+								: t("search.scanning").replace("{percent}", String(scanInfo.percent))
+						}, "scanning")
 						: null,
+					scanCapped === true
+						? jsx("div", { className: "cn-warn", role: "status", children: t("search.scanCapped").replace("{mb}", formatBytes(scanInfo.limitBytes)) }, "scancapped")
+						: null,
+					scanError === null
+						? null
+						: jsx("div", { className: "cn-warn", role: "status", children: t("search.scanError").replace("{message}", scanError) }, "scanerror"),
+					// 匹配位于预览上限之外：列出来也跳不过去，单独计数（不冒充「无匹配」）。
+					beyondCapCount > 0
+						? jsx("div", { className: "cn-warn", role: "status", children: t("search.beyondCap").replace("{n}", String(beyondCapCount)).replace("{cap}", String(__cn.MAX_PREVIEW_LINES)) }, "beyondcap")
+						: null,
+					// 当前匹配还没加载：提示按 Enter / 下一个定位，或正在续读到的进度。
+					searchJump === null
+						? null
+						: jsx("div", {
+							className: searchJump.loading ? "cn-note" : "cn-warn",
+							role: "status",
+							children: searchJump.loading
+								? t("search.jumping").replace("{line}", String(searchJump.line)).replace("{n}", String(searchJump.loaded))
+								: t("search.pendingJump").replace("{line}", String(searchJump.line)).replace("{n}", String(searchJump.loaded))
+						}, "searchjump"),
 					symbols.capped === true
 						? jsx("div", { className: "cn-warn", children: t("symbols.capped").replace("{n}", String(__cn.OUTLINE_MAX_SYMBOLS)) }, "symcapped")
 						: null,

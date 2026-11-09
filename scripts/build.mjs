@@ -39,6 +39,7 @@ export const EXPORTS = [
   "langOf", "langLabel", "LANG_EXT", "LANG_META",
   "tokenizeLines", "outlineOf", "outlineOfTokens", "kindGroup", "OUTLINE_MAX_SYMBOLS",
   "findMatches", "spansOfLine", "MAX_MATCHES",
+  "SCAN_MAX_BYTES", "appendScannedMatches", "scanProgress",
   "SELECTION_LIMIT", "selectionHeader", "selectionWhere", "selectionPayload", "buildSelectionInsert",
   "CHIP_PLACEHOLDER", "detectTextOf", "needsLeadingSpace", "hasQuoteMarkers",
   "RENDER_MAX_LINES", "renderedLineCount", "inRenderWindow", "lineIsPlain",

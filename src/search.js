@@ -8,6 +8,65 @@
 /** 单次查找返回的匹配上限（界面据此提示「还有更多」，避免看起来只有 2000 处）。 */
 export const MAX_MATCHES = 2000;
 
+/**
+ * 分页态「后台全文扫描」的字节预算。
+ *
+ * >5 MB 的文件宿主只给 `{ size, largeFile }`，客户端没有正文；要让查找覆盖
+ * 未滚动加载的行，只能按页读（`fs.readPage`，128 KiB / 页）。整份超大文件全扫
+ * 会变成几百次宿主读取，所以设一个预算：扫到预算就停，界面明确说「只扫描了前
+ * N MB」。64 MB ≈ 512 页，在本地主机上是秒级。
+ */
+export const SCAN_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
+ * 增量扫描的累加器：把一页的命中（行号相对该页、0 基）平移到文件全局行号后
+ * 接进 `collected`；达到 `max` 条即停并标记 capped（还有没收集进来的命中）。
+ *
+ * 页是按整行对齐的（`fs.readPage` 的契约），所以「上一页累计行数」就是下一页
+ * 的行号偏移，不需要按字节反推行号。
+ *
+ * @param {Array<{start:number,end:number,line:number,col:number}>} collected 已收集的命中
+ * @param {Array<{start:number,end:number,line:number,col:number}>} pageMatches 本页命中（页内 0 基行号）
+ * @param {number} lineOffset 本页首行在文件里的 0 基行号
+ * @param {number} [max] 命中上限（默认 {@link MAX_MATCHES}）
+ * @returns {{matches:Array<{start:number,end:number,line:number,col:number}>, capped:boolean}}
+ */
+export function appendScannedMatches(collected, pageMatches, lineOffset, max = MAX_MATCHES) {
+	const base = Array.isArray(collected) ? collected : [];
+	const offset = typeof lineOffset === "number" && Number.isFinite(lineOffset) ? Math.max(0, Math.floor(lineOffset)) : 0;
+	const limit = typeof max === "number" && Number.isFinite(max) && max > 0 ? Math.floor(max) : MAX_MATCHES;
+	const out = base.slice();
+	let capped = false;
+	const page = Array.isArray(pageMatches) ? pageMatches : [];
+	for (const m of page) {
+		if (out.length >= limit) { capped = true; break; }
+		out.push({ start: m.start, end: m.end, line: m.line + offset, col: m.col });
+	}
+	// findMatches 在页内就探测到「还有第 N+1 条」时也要把 capped 传上去
+	if (pageMatches !== null && pageMatches !== undefined && pageMatches.capped === true) capped = true;
+	return { matches: out, capped };
+}
+
+/**
+ * 全文扫描进度：百分比以「实际会扫描的字节数」为分母（总大小与预算取小），
+ * `capped` 表示预算先到、文件还没扫完。
+ * @param {unknown} scannedBytes 已扫描字节
+ * @param {unknown} totalBytes 文件总字节（未知时传 undefined）
+ * @param {number} [maxBytes] 扫描预算（默认 {@link SCAN_MAX_BYTES}）
+ * @returns {{percent:number|null, capped:boolean, limitBytes:number}}
+ */
+export function scanProgress(scannedBytes, totalBytes, maxBytes = SCAN_MAX_BYTES) {
+	const max = typeof maxBytes === "number" && Number.isFinite(maxBytes) && maxBytes > 0 ? maxBytes : SCAN_MAX_BYTES;
+	const scanned = typeof scannedBytes === "number" && Number.isFinite(scannedBytes) && scannedBytes > 0
+		? Math.min(scannedBytes, max)
+		: 0;
+	const total = typeof totalBytes === "number" && Number.isFinite(totalBytes) && totalBytes > 0 ? totalBytes : 0;
+	const limitBytes = total === 0 ? max : Math.min(total, max);
+	const capped = total === 0 ? scanned >= max : total > max && scanned >= max;
+	const percent = limitBytes > 0 ? Math.max(0, Math.min(100, Math.round((scanned / limitBytes) * 100))) : 0;
+	return { percent, capped, limitBytes };
+}
+
 /** 在不改变数组内容 / deepEqual 结果的前提下标记确实存在第 N+1 条匹配。 */
 function markSearchCapped(items) {
   if (items.capped !== true) Object.defineProperty(items, "capped", { value: true, enumerable: false });
